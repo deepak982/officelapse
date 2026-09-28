@@ -1,0 +1,277 @@
+{
+  "version": 1,
+  "generated": "2026-09-28",
+  "pathsRelativeTo": "repo root \u2014 the directory index.html is served from",
+  "three": {
+    "version": "0.160.0",
+    "core": "vendor/three.module.js",
+    "addons": {
+      "GLTFLoader": "vendor/GLTFLoader.js",
+      "SkeletonUtils": "vendor/SkeletonUtils.js",
+      "OrbitControls": "vendor/OrbitControls.js",
+      "BufferGeometryUtils": "vendor/BufferGeometryUtils.js"
+    },
+    "note": "Vendored, no import map needed. The bare 'three' specifier in each addon was rewritten to './three.module.js', so import the addons by relative path and nothing else is required."
+  },
+  "rig": {
+    "file": "assets/rig-human.glb",
+    "skinName": "Armature",
+    "skinnedMeshNames": [
+      "Mannequin_1",
+      "Mannequin_2"
+    ],
+    "skinnedMeshNote": "The mesh has two primitives, so GLTFLoader yields TWO SkinnedMesh children (not one). Find them with a traverse on o.isSkinnedMesh rather than by name. SkeletonUtils.clone handles both correctly.",
+    "skeletonId": "quaternius-human",
+    "boneCount": 71,
+    "rootBone": "root",
+    "headBone": "Head",
+    "neckBone": "neck_01",
+    "handBones": {
+      "left": "hand_l",
+      "right": "hand_r"
+    },
+    "propSockets": [
+      "socket_offhand",
+      "socket_offhand_grip"
+    ],
+    "fingersRigged": true,
+    "heightUnits": {
+      "bindPose": 1.8269,
+      "posedIdle": 1.778,
+      "posedWalk": 1.7673,
+      "posedSitting": 1.4323,
+      "note": "Measured with skinning applied (applyBoneTransform), not from a bounding box."
+    },
+    "feetAtY": 0.0,
+    "feetNote": "Feet land on y=0 in bind pose and in every posed clip (walk dips to -0.005 on a foot plant). Drop the model in at world (p.x, 0, p.y) with no y offset.",
+    "scale": 1.0,
+    "scaleNote": "Authored in metres (measured bind-pose height 1.8269). The contract sets 1 tile = 1 world unit, so 1 tile is read as 1 metre and no scaling is applied. Add the model at scale 1 and its feet sit on y=0.",
+    "cloneWith": "SkeletonUtils.clone",
+    "cloneNote": "import { clone } from './vendor/SkeletonUtils.js'. Never mesh.clone() \u2014 a plain clone shares one skeleton and every person animates identically.",
+    "bboxWarning": "Box3.setFromObject() on this rig reports ~0.458, not 1.83 \u2014 it does not account for skinning here. Do not size the camera or a blob shadow from it; use the measured heights above."
+  },
+  "clipLoading": {
+    "pattern": "The rig GLB holds the mesh and has zero animations. Each clip GLB holds exactly one AnimationClip and zero meshes. Load the rig once, load each clip GLB once, take gltf.animations[0], and share that clip across all mixers.",
+    "binding": "Verified: every animated track targets a bone name that exists on the rig, so clips bind to a cloned rig with no retargeting.",
+    "unanimatedBones": [
+      "ik_hand_root",
+      "ik_hand_gun",
+      "ik_hand_l",
+      "ik_hand_r",
+      "socket_offhand",
+      "socket_offhand_grip"
+    ]
+  },
+  "clips": {
+    "walk": {
+      "file": "assets/clips/walk_loop.glb",
+      "clip": "walk_loop",
+      "duration": 1.333,
+      "loop": true,
+      "fidelity": "exact",
+      "inPlace": false,
+      "rootMotion": {
+        "axis": "z",
+        "distance": 1.3,
+        "unitsPerSecond": 0.975
+      },
+      "note": "Root motion is BAKED IN. The contract drives position from the sim, so strip or zero the 'root' translation track before use, or the person walks away from where the sim put them. Play at rate = simSpeed / 0.975 to keep the feet from sliding."
+    },
+    "idle": {
+      "file": "assets/clips/idle_loop.glb",
+      "clip": "idle_loop",
+      "duration": 2.5,
+      "loop": true,
+      "fidelity": "exact",
+      "inPlace": true
+    },
+    "talk": {
+      "file": "assets/clips/idle_talking_loop.glb",
+      "clip": "idle_talking_loop",
+      "duration": 2.933,
+      "loop": true,
+      "fidelity": "exact",
+      "inPlace": true,
+      "note": "Standing and gesturing \u2014 matches the contract's 'meet' description directly."
+    },
+    "type": {
+      "file": "assets/clips/sitting_idle_loop.glb",
+      "clip": "sitting_idle_loop",
+      "duration": 1.667,
+      "loop": true,
+      "fidelity": "approximate",
+      "inPlace": true,
+      "note": "Seated, but the hands rest \u2014 there is NO typing motion in any CC0 clip found. Reads as 'at the desk', not 'typing'. Forearm/finger motion has to be layered procedurally on lowerarm_l/lowerarm_r if real typing is wanted."
+    },
+    "search": {
+      "file": "assets/clips/fixing_kneeling.glb",
+      "clip": "fixing_kneeling",
+      "duration": 5.2,
+      "loop": false,
+      "fidelity": "approximate",
+      "inPlace": true,
+      "note": "Stand -> kneel -> hold -> stand, measured: standing to t=0.4, kneeling down 0.4-0.8, held kneel 0.8-4.0, stands back up 4.4-5.2. It is NOT a loop despite the source flagging it as one. For a sustained filing pose, loop the 0.9-4.0s sub-range; play the whole clip once if you want the approach and recovery. Offset the start time per person so a row of filing people is not in lockstep."
+    }
+  },
+  "gestures": {
+    "point": {
+      "file": "assets/clips/interact.glb",
+      "clip": "interact",
+      "duration": 2.0,
+      "fidelity": "approximate",
+      "note": "A single reach-forward. Passes as a point; it is not a pointing finger."
+    },
+    "handoff": {
+      "file": "assets/clips/pickup_table.glb",
+      "clip": "pickup_table",
+      "duration": 0.833,
+      "fidelity": "approximate",
+      "note": "Reach down to a surface and take something. Reads as passing work along."
+    },
+    "typefast": {
+      "file": null,
+      "clip": null,
+      "fidelity": "missing",
+      "note": "No CC0 typing clip exists. Synthesise: oscillate lowerarm_l/lowerarm_r plus the index/middle finger chains over the seated base clip."
+    },
+    "headscratch": {
+      "file": null,
+      "clip": null,
+      "fidelity": "missing",
+      "note": "No CC0 equivalent. Synthesise: raise upperarm_r + bend lowerarm_r toward 'Head', small Head tilt."
+    },
+    "lookup": {
+      "file": null,
+      "clip": null,
+      "fidelity": "missing",
+      "note": "No CC0 equivalent. Synthesise: pitch 'Head' and neck_01 up ~15 degrees with an ease in/out. Cheapest of the three to fake convincingly."
+    }
+  },
+  "extraClips": {
+    "comment": "Not required by the contract, downloaded because the facility vocabulary makes them worth having. Same rig, same loading pattern.",
+    "walk_formal": {
+      "file": "assets/clips/walk_formal_loop.glb",
+      "clip": "walk_formal_loop",
+      "duration": 1.333,
+      "loop": true,
+      "inPlace": false,
+      "rootMotion": {
+        "axis": "z",
+        "distance": 1.3,
+        "unitsPerSecond": 0.975
+      },
+      "use": "A more composed walk. Better default than walk_loop for an office corridor."
+    },
+    "jog": {
+      "file": "assets/clips/jog_fwd_loop.glb",
+      "clip": "jog_fwd_loop",
+      "duration": 0.933,
+      "loop": true,
+      "inPlace": false,
+      "rootMotion": {
+        "axis": "z",
+        "distance": 5.0,
+        "unitsPerSecond": 5.36
+      },
+      "use": "Hurrying. Fast \u2014 5.36 u/s of baked root motion."
+    },
+    "idle_foldarms": {
+      "file": "assets/clips/idle_foldarms_loop.glb",
+      "clip": "idle_foldarms_loop",
+      "duration": 2.5,
+      "loop": true,
+      "inPlace": true,
+      "use": "Second standing idle, so a lounge full of people is not one pose."
+    },
+    "idle_phone": {
+      "file": "assets/clips/idle_talkingphone_loop.glb",
+      "clip": "idle_talkingphone_loop",
+      "duration": 2.933,
+      "loop": true,
+      "inPlace": true,
+      "use": "phonebooths."
+    },
+    "sit_talk": {
+      "file": "assets/clips/sitting_talking_loop.glb",
+      "clip": "sitting_talking_loop",
+      "duration": 2.933,
+      "loop": true,
+      "inPlace": true,
+      "use": "boardroom and huddle \u2014 seated meeting."
+    },
+    "sit_enter": {
+      "file": "assets/clips/sitting_enter.glb",
+      "clip": "sitting_enter",
+      "duration": 1.3,
+      "loop": false,
+      "inPlace": true,
+      "use": "One-shot transition into any seated clip."
+    },
+    "sit_exit": {
+      "file": "assets/clips/sitting_exit.glb",
+      "clip": "sitting_exit",
+      "duration": 1.033,
+      "loop": false,
+      "inPlace": true,
+      "use": "One-shot transition out of a seated clip."
+    },
+    "consume": {
+      "file": "assets/clips/consume.glb",
+      "clip": "consume",
+      "duration": 1.333,
+      "loop": true,
+      "inPlace": true,
+      "use": "cafeteria \u2014 eating or drinking."
+    },
+    "nod": {
+      "file": "assets/clips/yes.glb",
+      "clip": "yes",
+      "duration": 2.5,
+      "loop": true,
+      "inPlace": true,
+      "use": "Agreement one-shot in meetings."
+    },
+    "shake": {
+      "file": "assets/clips/idle_no_loop.glb",
+      "clip": "idle_no_loop",
+      "duration": 2.5,
+      "loop": true,
+      "inPlace": true,
+      "use": "Disagreement one-shot."
+    },
+    "push": {
+      "file": "assets/clips/push_loop.glb",
+      "clip": "push_loop",
+      "duration": 2.667,
+      "loop": true,
+      "inPlace": false,
+      "rootMotion": {
+        "axis": "z",
+        "distance": 0.8,
+        "unitsPerSecond": 0.3
+      },
+      "use": "Pushing a trolley. Unused today; cheap to keep."
+    }
+  },
+  "props": {
+    "models": {},
+    "note": "No prop models. Every prop type in the contract's vocabulary is built from primitives. The only CC0 props on the animation source were a katana and a training stick, which no office needs. Office props at this scale are boxes and cylinders, and primitives also keep them InstancedMesh-able per the performance budget."
+  },
+  "standIn": {
+    "note": "The performance budget caps full rigs at ~40. There is no separate low-poly stand-in model. Use a primitive for the rest \u2014 a capsule or a 2-quad billboard at scale 1.0 x 1.8287 so it reads at the same height as a real rig."
+  },
+  "totalBytes": 2346108,
+  "licence": "CC0-1.0 for every file under assets/. See assets/CREDITS.md.",
+  "poseHeights": {
+    "comment": "Measured world-space bone heights, scale 1. Props must match these or people float and sink.",
+    "seatTopForSittingClips": 0.44,
+    "seatNote": "Seated clips put the pelvis at y=0.542. Model chair and sofa seat surfaces with their top at ~0.44 so the body rests on them. A stool or bench at a different height will look wrong with these clips.",
+    "standingPelvis": 0.877,
+    "standingHead": 1.526,
+    "seatedHead": 1.178,
+    "seatedHandsInLap": 0.644,
+    "gesturingHand": 0.922,
+    "ankle": 0.103,
+    "deskNote": "The seated clips rest the hands in the lap at y=0.644, NOT on a desk. A desk surface at the usual ~0.73 will sit above the hands. This is the visible cost of having no real typing clip."
+  }
+}

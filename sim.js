@@ -16,6 +16,7 @@ if (!F) throw new Error('sim.js needs floor.js loaded first');
 const { N, E, S, W } = F;
 
 const IDLE = 90, GONE = 900;              // simulation seconds
+const LONG_IDLE = 300;                    // quiet this long and the break becomes a washroom run
 const BREAK_OVER = 45;                    // sim seconds at the cooler before going back
 const TRIP_GAP = 40;                      // sim seconds between trips away from the desk
 const SPEEDS = [1, 10, 60, 300, 1800];
@@ -122,21 +123,49 @@ function relabel() {
 /* -------------------------------------------------------------- people --- */
 const pkey = e => e.sid + '|' + (e.aid || '');     // agent ids repeat across sessions
 
+/* No desk left in your own room. The shared band has a bank of hot desks whose
+   entries are desk-shaped on purpose, so claimDesk/releaseDesk work on them
+   unchanged — and they give a real facing, which a bare seat does not. Keyed by
+   p.key, never the bare agent id: agent ids repeat across sessions and this
+   amenity is shared by all of them. Returns null when it is full or not built,
+   and the caller falls back to the room's own standing room. */
+function coworkDesk(key) {
+  const a = (F.state.amenities || []).find(x => x.kind === 'coworking');
+  if (!a || !a.desks || !a.desks.length) return null;
+  const d = F.claimDesk(a, key);
+  return d ? { fac: a, desk: d } : null;
+}
+
 function personFor(e) {
   const key = pkey(e);
   let p = St.people[key];
   if (p) return p;
-  const s = St.sessions[e.sid] || { proj: '?', agents: [] };
-  const room = F.ensureRoom(e.sid, s.proj || '?');
+  // An event can beat its own session's metadata onto the wire. Building the room
+  // now would file it under project '?', which ensureRoom gives a department of its
+  // own — a whole DEPT_PITCH away from the team it belongs to, and rooms never
+  // move. Better to appear a poll late than to sit marooned all session.
+  const s = St.sessions[e.sid];
+  if (!s || !s.proj) return null;
+  const room = F.ensureRoom(e.sid, s.proj);
   const boss = !e.aid;
-  const desk = boss ? F.claimBoss(room, e.sid)
-                    : (F.claimDesk(room, e.aid) || F.hotDesk(room, e.aid));
+  let desk, cowork = null;
+  if (boss) desk = F.claimBoss(room, e.sid);
+  else {
+    desk = F.claimDesk(room, e.aid);
+    if (!desk) {
+      const cw = coworkDesk(key);
+      if (cw) { desk = cw.desk; cowork = cw.fac; }
+      else desk = F.hotDesk(room, e.aid);
+    }
+  }
   const meta = e.aid ? (St.agentMeta[e.sid + '/' + e.aid] || {}) : s;
   const h = hash(key);
   p = St.people[key] = {
     key, sid: e.sid, aid: e.aid, boss, room,
-    desk,
-    hue: boss ? deptHue(s.proj || '?') : (h % 360),
+    desk, h, cowork,                    // h also decides which facilities they use
+    fac: null,                          // the amenity whose seat they are holding
+    gesture: '',                        // tool-level one-shot for the 3D layer
+    hue: boss ? deptHue(s.proj) : (h % 360),
     x: room.door.x + .5, y: room.door.y + .5,
     path: null, pi: 0, dest: null, speed: 2.0 + (h % 40) / 100,
     lane: ((h % 5) - 2) * .17,          // keep to your own side of the aisle
@@ -150,26 +179,102 @@ function personFor(e) {
   return p;
 }
 
+/* -------------------------------------------------------------- routing --- */
+/* A one-shot played over the base clip, so it says what the tool was, not just
+   what the body is doing. Anything not listed clears it. */
+const GESTURES = {
+  Read: 'point', Edit: 'typefast', Write: 'typefast', Bash: 'headscratch',
+  Task: 'handoff', Agent: 'handoff', SendMessage: 'handoff',
+  WebFetch: 'lookup', WebSearch: 'lookup',
+};
+
+/* Which shared facility each kind of trip can end in. '' means "keep to your own
+   room", and it is one of the options on purpose: if everybody walked out the
+   corridor would be a parade and the rooms would be empty. */
+const AWAY = {
+  break: ['', 'cafeteria', 'lounge'],
+  lookup: ['', 'lounge', 'wellness'],
+  // A one-entry list is not a choice: `% 1` is always 0, so every single person
+  // took the washroom run the moment they crossed LONG_IDLE. Two blanks make it the
+  // minority trip it reads as, off the same hash slice as the other two.
+  washroom: ['', '', 'washrooms'],
+};
+/* independent bit slices of one hash, so the three decisions do not correlate */
+const AWAY_BIT = { break: 3, lookup: 9, washroom: 15 };
+/* ...but only once the hash is mixed. hash() is a plain *31 rolling hash and sibling
+   keys ('s1|a0' .. 's1|a13') differ only in their last character, so every slice above
+   bit ~8 is IDENTICAL across a whole room: `lookup` picked one facility per session,
+   not per person, and the washroom slice was constant. One multiply spreads the low
+   bits over the word. Still a pure function of p.h, so a rebuild replays it. */
+const KNUTH = 2654435761;
+
+/* Everyone leaving a claimed spot frees BOTH sides: the room's zones and the
+   shared facility they may have walked to. Facility seats live on the amenity,
+   not on the room, so releasing only the room leaks them (EDGE_CASES C3). */
+function freeSpots(p) {
+  F.releaseSpots(p.room, p.key);
+  if (p.fac) { F.releaseSpots(p.fac, p.key); p.fac = null; }
+}
+
+/* A hot desk is held for the whole visit, not just for one trip, so only the two
+   paths that end someone's day give it back. Leaking it is the desk leak one
+   level up (EDGE_CASES C3), just in the shared band instead of a team room. */
+function freeAll(p) {
+  freeSpots(p);
+  if (p.cowork) { F.releaseDesk(p.cowork, p.key); p.cowork = null; }
+}
+
+/* A trip up to the shared band, or null to use the room's own zone.
+   The pick is bits of hash(p.key) and never Math.random: scrubbing back to the
+   same clock has to rebuild the same floor (test S6). floor.js may not have built
+   a given kind yet, and a facility with no free seat is no use either — both
+   return null and the caller falls back in-room. */
+function trip(p, why, act) {
+  const opts = AWAY[why];
+  const kind = opts[((Math.imul(p.h, KNUTH) >>> 0) >>> AWAY_BIT[why]) % opts.length];
+  const a = kind && (F.state.amenities || []).find(x => x.kind === kind);
+  if (!a || !a.seats || !a.seats.length) return null;
+  // Full is a refusal. takeSpot's documented overflow shares the last spot, which in
+  // a facility means ten people standing inside one another on one washroom tile —
+  // what the room's own zone is the fallback for. Reads the bookkeeping takeSpot writes.
+  const held = (a._held && a._held.seats) || {};
+  if (held[p.key] === undefined && Object.keys(held).length >= a.seats.length) return null;
+  const sp = F.takeSpot(a, 'seats', p.key);
+  if (!sp) return null;
+  if (p.fac && p.fac !== a) F.releaseSpots(p.fac, p.key);
+  F.releaseSpots(p.room, p.key);        // not in the room any more
+  p.fac = a;
+  return [sp.x, sp.y, act, N];
+}
+
 /* where a tool sends someone, and which way they end up looking */
 function station(p, tool) {
   const r = p.room;
   // someone who greps twenty times a minute does not walk to the cabinet twenty
   // times — they do it from their desk. Trips are occasional, not per tool call.
   const canTrip = St.clock - p.tripAt > TRIP_GAP;
-  if (!canTrip) { F.releaseSpots(r, p.key); return [p.desk.seat.x, p.desk.seat.y, 'type', p.desk.dir]; }
+  if (!canTrip) return atDesk(p);
   if (tool === 'Grep' || tool === 'Glob') {
+    freeSpots(p);
     const sp = F.takeSpot(r, 'archive', p.key);
     return [sp.x, sp.y, 'file', N];
   }
   if (!p.boss && (tool === 'Task' || tool === 'Agent' || tool === 'SendMessage')) {
+    freeSpots(p);
     const sp = F.takeSpot(r, 'meet', p.key);          // a boss never walks to meet himself
     return [sp.x, sp.y, 'meet', N];
   }
   if (tool === 'WebFetch' || tool === 'WebSearch') {
+    const out = trip(p, 'lookup', 'think');           // the lounge or the quiet room
+    if (out) return out;
     const sp = F.takeSpot(r, 'break', p.key);
     return [sp.x, sp.y, 'think', N];
   }
-  F.releaseSpots(r, p.key);
+  return atDesk(p);
+}
+
+function atDesk(p) {
+  freeSpots(p);
   return [p.desk.seat.x, p.desk.seat.y, 'type', p.desk.dir];
 }
 
@@ -194,14 +299,17 @@ function arrive(p) {
 
 function apply(e) {
   const p = personFor(e);
-  if (p.state === 'leaving') return;                  // one-shot: cannot be overridden
+  if (!p) return false;                               // session metadata not in yet
+  if (p.state === 'leaving') return true;             // one-shot: cannot be overridden
   const [tx, ty, act, face] = station(p, e.tool);
   if (!p.dest || p.dest.x !== tx || p.dest.y !== ty) goTo(p, tx, ty, act, face);
+  p.gesture = GESTURES[e.tool] || '';                 // unlisted tool clears the last one
   p.last = e.t;
   p.room.lastT = e.t;
   p.display = personName(p);
   p.saying = e.kind === 'prompt' ? '“' + e.say + '”' : e.say;
   hooks.say(p, p.saying, e.kind === 'prompt', e.t);
+  return true;
 }
 
 /* "applied" lives on the event, not on an index, because the array is re-sorted
@@ -214,7 +322,7 @@ function rewind() {
 function rebuild(to) {
   for (const k in St.people) {
     const p = St.people[k];
-    F.releaseSpots(p.room, k);
+    freeAll(p);
     if (!p.boss && p.aid) F.releaseDesk(p.room, p.aid);
   }
   St.people = {};
@@ -247,17 +355,32 @@ function step(dt) {
     const age = St.clock - p.last;
 
     if (age > GONE && p.state !== 'leaving') {
-      F.releaseSpots(p.room, p.key);
+      freeSpots(p);
+      p.gesture = '';                                 // on the way out, not mid-tool
       p.state = 'leaving';
       goTo(p, p.room.door.x, p.room.door.y, 'leaving', N);
       p.state = p.path ? 'walk' : 'leaving';
       p.act = 'leaving';
     } else if (p.state === 'think' && St.clock - p.breakAt > BREAK_OVER) {
+      freeSpots(p);                                   // hand the seat back before walking off
       goTo(p, p.desk.seat.x, p.desk.seat.y, 'type', p.desk.dir);   // break over, back to work
-    } else if (age > IDLE && age <= GONE && p.state === 'type' && p.breakAt < p.last) {
+    // A long quiet spell earns a second trip — the washroom run. The clause is
+    // `breakAt < p.last + LONG_IDLE` so it fires exactly once, never on a loop.
+    } else if (age > IDLE && age <= GONE && p.state === 'type' &&
+               (p.breakAt < p.last || (age > LONG_IDLE && p.breakAt < p.last + LONG_IDLE))) {
+      // Which trip, by what they have already had — not by age. A reloaded page
+      // replays its backlog with the clock jumping, so the first time step() sees
+      // most people they are already past LONG_IDLE: keyed off age, they all went
+      // straight to the washrooms and nobody ever saw the cafeteria.
+      const why = p.breakAt < p.last ? 'break' : 'washroom';
       p.breakAt = St.clock;
-      const sp = F.takeSpot(p.room, 'break', p.key);
-      goTo(p, sp.x, sp.y, 'think', N);
+      p.gesture = '';
+      const out = trip(p, why, 'think');
+      if (out) { goTo(p, out[0], out[1], out[2], out[3]); }
+      else {
+        const sp = F.takeSpot(p.room, 'break', p.key);
+        goTo(p, sp.x, sp.y, 'think', N);
+      }
     }
 
     p.phase += dt * (p.state === 'walk' ? 8.5 : 2.6);
@@ -305,7 +428,7 @@ function step(dt) {
 }
 
 function exit(p) {
-  F.releaseSpots(p.room, p.key);
+  freeAll(p);                                           // zone, facility seat and hot desk
   if (!p.boss && p.aid) F.releaseDesk(p.room, p.aid);   // clocked out: free the desk
   delete St.people[p.key];
 }
@@ -325,8 +448,12 @@ function advance(dt) {
   while (i < St.events.length && St.events[i].t <= St.clock && budget > 0) {
     const e = St.events[i++];
     if (e.done) continue;
+    // Its session's name may not have arrived yet; apply() refuses rather than
+    // file the room under '?'. Hold the event and retry on the next frame — but
+    // bound it: a held event pins the scan head, and a poll is 2 seconds, so a
+    // name still missing after IDLE is not coming. Drop it and move on.
+    if (!apply(e)) { if (St.clock - e.t > IDLE) e.done = true; continue; }
     e.done = true; budget--; applied++;
-    apply(e);
   }
   while (St.scanFrom < St.events.length && St.events[St.scanFrom].done) St.scanFrom++;
   // backlog drained once we are back to at most one event per frame: animate again
@@ -337,7 +464,7 @@ function advance(dt) {
 }
 
 const Sim = {
-  St, hooks, SPEEDS, IDLE, GONE, FF_ABOVE,
+  St, hooks, SPEEDS, IDLE, LONG_IDLE, GONE, FF_ABOVE, BREAK_OVER,
   poll, relabel, advance, step, apply, rebuild, rewind, personFor, exit,
   roomHit, roomText, personText,
   roomName, personName, taskLabel, shortLabel, clean, deptHue, hash, pkey,

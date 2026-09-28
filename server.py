@@ -369,6 +369,12 @@ class H(http.server.SimpleHTTPRequestHandler):
                 since = float(urllib.parse.parse_qs(u.query).get("since", ["0"])[0])
             except ValueError:
                 since = 0.0
+            # The sequence restarts at 0 with the process, but an open page keeps
+            # counting from where the last one left off. A cursor ahead of anything
+            # we have ever issued can only be from an older server, and filtering
+            # against it would send that page nothing for as long as it stays open.
+            if since > _seq[0]:
+                since = 0.0
             with _lock:                 # scan() mutates globals this then serialises
                 if time.time() - _scanned[0] > SCAN_TTL:
                     scan()

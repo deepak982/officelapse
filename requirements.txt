@@ -1,0 +1,21 @@
+# officelapse has no third-party Python dependencies. This file is intentionally
+# empty of packages, and exists so that `pip install -r requirements.txt` succeeds
+# and so nobody has to read server.py to find out there is nothing to install.
+#
+# The server imports only the standard library:
+#   glob, http.server, json, os, re, socketserver, threading, time, urllib.parse,
+#   datetime  (and, in the test suites, shutil, sys, tempfile)
+#
+# What you actually need is a Python version, not a package:
+#
+#   Python >= 3.8
+#
+# Nothing here uses the walrus operator, match statements, str.removeprefix or
+# dict union, so 3.8 is a real floor rather than a guess.
+#
+# The browser side has no package manager either — no npm, no build step. Three.js
+# is vendored into vendor/ rather than installed; see assets/CREDITS.md for the
+# pinned version and licence of everything vendored.
+#
+# Full runtime requirements, including the browser and Node floors, are in the
+# Requirements section of README.md.

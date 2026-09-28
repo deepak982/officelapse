@@ -19,6 +19,18 @@ const DEPT_GAP = 3;                  // lane between departments
 const CORRIDOR_H = 3;                // walkable spine along the top
 const DEPT_PITCH = DEPT_COLS * SLOT_W + DEPT_GAP;
 
+/* Shared facilities sit in a band ABOVE the corridor, never in the space between
+   two departments: that space belongs to rooms 2 and 3 of a team that has not
+   opened them yet, and a cafeteria built there would be built over the moment
+   they do. The band is laid out once and nothing ever claims it. */
+const AM_Y = 1;                      // the band starts one tile in from the north edge
+const AM_H = 11;                     // both facility rows are this tall
+const AM_GAP = 2;                    // between neighbours, and the depth of the aisle
+const AM_X0 = 1;                     // first facility in each row
+const AM_ROW_Y = [AM_Y, AM_Y + AM_H + AM_GAP];   // north row, south row
+const CORRIDOR_Y = AM_ROW_Y[1] + AM_H;   // corridor runs between the band and the teams
+const ROOM_Y0 = CORRIDOR_Y + CORRIDOR_H + 2;
+
 const N = 0, E = 1, S = 2, W = 3;    // facing: the direction the occupant looks
 
 const BLOCK = 1, FREE = 0;
@@ -29,6 +41,7 @@ const F = {
   blocked: null,         // Uint8Array(gw*gh); anything outside a room/lane is blocked
   rooms: {},             // sid -> room
   depts: {},             // proj -> { idx, rooms: [sid] }
+  amenities: [],         // the ten shared facilities in the band — built once
   _paths: new Map(),     // "fx,fy>tx,ty" -> [{x,y}]
 };
 
@@ -134,12 +147,247 @@ function buildInterior(r) {
   r.center = { x: gx + ROOM_W / 2, y: gy + ROOM_H / 2 };
 }
 
+/* ------------------------------------------------------- shared facilities --- */
+/* The band above the corridor. Same bones as a team room — walls, a door onto the
+   corridor, props, and spots people can stand or sit in — but nobody is assigned
+   here and no desk is ever claimed.
+
+   Eleven facilities go in TWO rows, each sized to what it holds. One row at a
+   uniform 18-tile slot would make the band 198 tiles wide — nearly 3 department
+   pitches — and the default zoom frames the whole floor, so one row would shrink
+   every team room to a smudge. Two rows, individually sized (a phone booth is not a
+   cafeteria), come to 94x24: about 1.4 pitches, so the floor still frames.
+
+   The south row opens straight onto the corridor. The north row opens onto a 2-tile
+   aisle between the rows, which reaches the corridor through the gaps the south row
+   leaves between its facilities. Every door is still on its own SOUTH wall. */
+
+const put = (a, type, x, y, w, h, extra) => {
+  for (let i = 0; i < w; i++) for (let j = 0; j < h; j++) setBlocked(a.gx + x + i, a.gy + y + j);
+  a.props.push(Object.assign({ type, x: a.gx + x, y: a.gy + y, w, h }, extra));
+};
+/* on a wall, so the tile is already blocked — pictures, mirrors, signage */
+const deco = (a, type, x, y, extra) =>
+  a.props.push(Object.assign({ type, x: a.gx + x, y: a.gy + y, w: 1, h: 1 }, extra));
+const spot = (a, x, y) => a.seats.push({ x: a.gx + x, y: a.gy + y });
+/* A chair is furniture somebody stands ON, so the prop and the seat are the same
+   tile and it must not block: blocking a chair traps the seat it exists to give. */
+const sit = (a, type, x, y) => {
+  a.props.push({ type, x: a.gx + x, y: a.gy + y, w: 1, h: 1 });
+  a.seats.push({ x: a.gx + x, y: a.gy + y });
+};
+/* A shared bench desk. Same shape as a team room's desk — blocked tile, occupant on
+   the outer side, a facing — so claimDesk()/releaseDesk() work on it unchanged. */
+const desk = (a, dx, dy, sx, sy, dir) => {
+  a.desks.push({ x: a.gx + dx, y: a.gy + dy,
+                 seat: { x: a.gx + sx, y: a.gy + sy }, dir, by: null });
+  sit(a, 'chair', sx, sy);
+};
+
+/* Every facility is AM_H tall, so its interior is x 1..w-2, y 1..AM_H-2 and its
+   door sits at local x = w/2|0 on the south wall. The tile directly inside that
+   door is left empty in every plan below — furniture there would seal the room. */
+const FURNISH = {
+  reception(a) {                                   // door x 7
+    put(a, 'counter', 4, 1, 5, 1);
+    deco(a, 'logo', 6, 0);
+    deco(a, 'art', 2, 0, { art: 0 });
+    deco(a, 'art', 11, 0, { art: 1 });
+    put(a, 'sofa', 2, 5, 3, 1);
+    put(a, 'sofa', 2, 7, 3, 1);
+    put(a, 'lowtable', 6, 6, 1, 1);
+    put(a, 'planter', 1, 3, 1, 1);
+    put(a, 'plant', 12, 2, 1, 1);
+    put(a, 'plant', 12, 8, 1, 1);
+    [[2, 6], [3, 6], [4, 6], [5, 2], [9, 2]].forEach(([x, y]) => spot(a, x, y));
+  },
+  cafeteria(a) {                                   // door x 9
+    put(a, 'counter', 2, 1, 6, 1);
+    put(a, 'coffee', 10, 1, 1, 1);
+    put(a, 'vending', 12, 1, 1, 1);
+    deco(a, 'menu', 9, 0);
+    deco(a, 'art', 4, 0, { art: 2 });
+    for (const x of [2, 6, 10, 14]) {              // four tables, aisles between
+      put(a, 'table', x, 4, 2, 2);
+      [[x, 3], [x + 1, 3], [x, 6], [x + 1, 6]].forEach(([sx, sy]) => spot(a, sx, sy));
+    }
+    put(a, 'plant', 1, 9, 1, 1);
+    put(a, 'plant', 16, 9, 1, 1);
+    [[3, 2], [5, 2], [7, 2], [10, 2]].forEach(([x, y]) => spot(a, x, y));   // the queue
+  },
+  washrooms(a) {                                   // door x 5
+    for (const x of [1, 4, 7]) {
+      put(a, 'stall', x, 1, 2, 2);
+      spot(a, x, 3);                               // whoever is waiting for that stall
+    }
+    put(a, 'sink', 1, 5, 1, 4);                    // sink run down the west wall
+    for (let y = 5; y <= 8; y++) deco(a, 'mirror', 0, y);
+    put(a, 'plant', 8, 8, 1, 1);
+    [[2, 5], [2, 7]].forEach(([x, y]) => spot(a, x, y));
+  },
+  lounge(a) {                                      // door x 6
+    put(a, 'sofa', 1, 2, 3, 1);
+    put(a, 'sofa', 1, 5, 3, 1);
+    put(a, 'lowtable', 4, 4, 1, 1);
+    put(a, 'shelf', 10, 1, 1, 3);                  // bookshelf
+    put(a, 'sofa', 8, 7, 3, 1);
+    put(a, 'lowtable', 9, 5, 1, 1);
+    deco(a, 'art', 3, 0, { art: 3 });
+    deco(a, 'art', 9, 0, { art: 4 });
+    put(a, 'planter', 1, 8, 1, 1);
+    put(a, 'plant', 11, 8, 1, 1);
+    [[1, 3], [2, 3], [3, 3], [1, 4], [3, 4], [8, 6], [9, 6], [10, 6]]
+      .forEach(([x, y]) => spot(a, x, y));
+  },
+  boardroom(a) {                                   // door x 8
+    put(a, 'longtable', 4, 4, 8, 2);
+    for (let x = 4; x <= 11; x++) { sit(a, 'chair', x, 3); sit(a, 'chair', x, 6); }
+    sit(a, 'chair', 3, 4);                         // the two ends
+    sit(a, 'chair', 12, 5);
+    deco(a, 'screen', 7, 0);                       // projector screen
+    deco(a, 'whiteboard', 0, 4);
+    put(a, 'cabinet', 12, 1, 3, 1);
+    put(a, 'plant', 1, 1, 1, 1);
+    put(a, 'plant', 1, 9, 1, 1);
+    put(a, 'plant', 14, 9, 1, 1);
+  },
+  huddle(a) {                                      // door x 8
+    /* two pods; the roundtable plus its ring of chairs IS the pod — a 'pod' prop
+       would be a blocked box around seats nobody could then reach. */
+    for (const x of [3, 10]) {
+      put(a, 'roundtable', x, 3, 2, 2);
+      [[x - 1, 3], [x - 1, 4], [x + 2, 3], [x + 2, 4], [x, 2], [x + 1, 5]]
+        .forEach(([sx, sy]) => sit(a, 'chair', sx, sy));
+    }
+    deco(a, 'whiteboard', 3, 0);
+    deco(a, 'whiteboard', 11, 0);
+    put(a, 'plant', 1, 8, 1, 1);
+    put(a, 'plant', 14, 8, 1, 1);
+  },
+  phonebooths(a) {                                 // door x 5
+    /* four singles, two to a side; the booth shell is blocked and the occupant
+       stands in its mouth, which keeps the middle column a clear run to the door. */
+    for (const [x, y, sy] of [[1, 1, 3], [6, 1, 3], [1, 6, 5], [6, 6, 5]]) {
+      put(a, 'booth', x, y, 2, 2);
+      spot(a, x, sy);
+    }
+    deco(a, 'art', 3, 0, { art: 7 });
+    put(a, 'plant', 8, 1, 1, 1);
+    put(a, 'plant', 8, 8, 1, 1);
+  },
+  printbay(a) {                                    // door x 6
+    put(a, 'printer', 2, 1, 2, 1);
+    put(a, 'printer', 5, 1, 2, 1);
+    put(a, 'shelf', 1, 4, 1, 4);
+    put(a, 'shelf', 10, 3, 1, 4);
+    put(a, 'cabinet', 2, 8, 3, 1);
+    put(a, 'bin', 8, 8, 1, 1);
+    put(a, 'bin', 9, 8, 1, 1);
+    put(a, 'plant', 10, 8, 1, 1);
+    [[2, 2], [5, 2], [2, 5], [9, 4], [3, 7]].forEach(([x, y]) => spot(a, x, y));
+  },
+  wellness(a) {                                    // door x 6
+    put(a, 'planter', 1, 1, 1, 7);                 // the planter wall
+    put(a, 'sofa', 3, 2, 3, 1);                    // low seating
+    put(a, 'sofa', 8, 5, 1, 3);
+    put(a, 'lowtable', 4, 5, 1, 1);
+    deco(a, 'art', 4, 0, { art: 5 });
+    deco(a, 'art', 9, 0, { art: 6 });
+    put(a, 'plant', 11, 1, 1, 1);
+    put(a, 'plant', 11, 8, 1, 1);
+    [[3, 3], [4, 3], [5, 3], [7, 5], [7, 6]].forEach(([x, y]) => spot(a, x, y));
+  },
+  serverroom(a) {                                  // door x 6
+    for (const x of [2, 4, 7, 9]) put(a, 'rack', x, 1, 1, 3);
+    /* the glazing reads as screens on the south wall: no prop type is a free-standing
+       partition, and a blocked one across the room would seal the racks off. */
+    deco(a, 'screen', 3, AM_H - 1);
+    deco(a, 'screen', 9, AM_H - 1);
+    put(a, 'cabinet', 1, 7, 2, 1);
+    put(a, 'bin', 10, 8, 1, 1);
+    [[4, 4], [2, 5], [6, 5], [9, 5]].forEach(([x, y]) => spot(a, x, y));
+  },
+  coworking(a) {                                   // door x 9
+    /* Four bench pods, sixteen desks, aisle down the middle and across. Overflow out
+       of a full team room has to read as working, so these are desks with chairs —
+       not the standing room the break zone was being used as. */
+    a.desks = [];
+    for (const py of [2, 7]) for (const px of [3, 10]) {
+      put(a, 'pod', px, py, 2, 2);
+      for (const i of [0, 1]) {
+        desk(a, px + i, py, px + i, py - 1, S);     // north side, looking back at the bench
+        desk(a, px + i, py + 1, px + i, py + 2, N); // south side
+      }
+    }
+    put(a, 'cooler', 16, 1, 1, 1);
+    put(a, 'shelf', 16, 4, 1, 3);
+    put(a, 'planter', 1, 1, 1, 1);
+    put(a, 'planter', 1, 9, 1, 1);
+    put(a, 'plant', 16, 9, 1, 1);
+    deco(a, 'art', 6, 0, { art: 8 });
+    deco(a, 'whiteboard', 13, 0);
+  },
+};
+
+const AMENITIES = [
+  { kind: 'reception',   label: 'RECEPTION',        row: 0, w: 14 },
+  { kind: 'cafeteria',   label: 'CAFETERIA',        row: 0, w: 18 },
+  { kind: 'washrooms',   label: 'WASHROOMS',        row: 0, w: 11 },
+  { kind: 'lounge',      label: 'LOUNGE',           row: 0, w: 13 },
+  { kind: 'boardroom',   label: 'BOARDROOM',        row: 0, w: 16 },
+  { kind: 'huddle',      label: 'HUDDLE',           row: 1, w: 16 },
+  { kind: 'phonebooths', label: 'PHONE BOOTHS',     row: 1, w: 10 },
+  { kind: 'printbay',    label: 'PRINT & SUPPLIES', row: 1, w: 12 },
+  { kind: 'wellness',    label: 'QUIET ROOM',       row: 1, w: 13 },
+  { kind: 'serverroom',  label: 'IT / SERVER',      row: 1, w: 12 },
+  { kind: 'coworking',   label: 'HOT DESKS',        row: 1, w: 18 },
+];
+
+/* The band's footprint in tiles — what a renderer needs to frame the floor. Derived
+   from the table, not from the built rooms, so it is right before anything is built. */
+const AM_ROW_W = AMENITIES.reduce((w, s) => (w[s.row] += s.w + AM_GAP, w), [AM_X0, AM_X0]);
+const AM_BAND = { x: 0, y: AM_Y, w: Math.max(AM_ROW_W[0], AM_ROW_W[1]), h: CORRIDOR_Y - AM_Y };
+
+function buildAmenities() {
+  if (F.amenities.length) return;
+  const bandW = AM_BAND.w;
+  ensureGrid(bandW + 2, ROOM_Y0 + SLOT_H + 4);
+
+  const nextX = [AM_X0, AM_X0];
+  for (const spec of AMENITIES) {
+    const gx = nextX[spec.row], gy = AM_ROW_Y[spec.row];
+    nextX[spec.row] = gx + spec.w + AM_GAP;
+    const a = { kind: spec.kind, label: spec.label, gx, gy, w: spec.w, h: AM_H,
+                props: [], seats: [], claims: {} };
+    for (let x = 1; x < spec.w - 1; x++) for (let y = 1; y < AM_H - 1; y++) setFree(gx + x, gy + y);
+    a.door = { x: gx + (spec.w / 2 | 0), y: gy + AM_H - 1 };
+    setFree(a.door.x, a.door.y);
+    a.center = { x: gx + spec.w / 2, y: gy + AM_H / 2 };
+    FURNISH[spec.kind](a);
+    F.amenities.push(a);
+  }
+
+  /* Open the aisle, and with it every column the south row does not stand on, all
+     the way down to the corridor. Doing it by column rather than by door is what
+     keeps a north door's route out of the band from tunnelling through a south
+     facility's wall, whatever widths the table above is given. */
+  const southCol = new Uint8Array(bandW + 2);
+  for (const a of F.amenities)
+    if (a.gy === AM_ROW_Y[1]) for (let x = a.gx; x < a.gx + a.w; x++) southCol[x] = 1;
+  for (let y = AM_ROW_Y[0] + AM_H; y < CORRIDOR_Y; y++)
+    for (let x = 0; x < bandW + 2; x++)
+      if (y < AM_ROW_Y[1] || !southCol[x]) setFree(x, y);
+
+  openLanes();                 // the corridor itself, so the band works with no rooms yet
+}
+
 /* ------------------------------------------------------------ placement --- */
 /* A room's slot is decided once, from its department index and its position in
    that department. Existing rooms are never re-packed. */
 function ensureRoom(sid, proj) {
   let r = F.rooms[sid];
   if (r) return r;
+  buildAmenities();            // the shared band exists before any team moves in
 
   let d = F.depts[proj];
   if (!d) d = F.depts[proj] = { proj, idx: Object.keys(F.depts).length, rooms: [] };
@@ -147,7 +395,7 @@ function ensureRoom(sid, proj) {
   d.rooms.push(sid);
 
   const gx = d.idx * DEPT_PITCH + (n % DEPT_COLS) * SLOT_W + 1;
-  const gy = CORRIDOR_H + 2 + Math.floor(n / DEPT_COLS) * SLOT_H;
+  const gy = ROOM_Y0 + Math.floor(n / DEPT_COLS) * SLOT_H;
 
   ensureGrid(gx + SLOT_W + DEPT_GAP + 2, gy + SLOT_H + 4);
 
@@ -160,14 +408,16 @@ function ensureRoom(sid, proj) {
 
 /* corridor along the top plus the service lanes east and south of every room */
 function openLanes() {
-  for (let x = 0; x < F.gw; x++) for (let y = 0; y < CORRIDOR_H; y++) setFree(x, y);
+  for (let x = 0; x < F.gw; x++)
+    for (let y = CORRIDOR_Y; y < CORRIDOR_Y + CORRIDOR_H; y++) setFree(x, y);
   for (const sid in F.rooms) {
     const r = F.rooms[sid];
     for (let y = r.gy - 2; y < r.gy + SLOT_H; y++)
       for (let x = r.gx + ROOM_W; x < r.gx + SLOT_W; x++) setFree(x, y);
     for (let x = r.gx - 2; x < r.gx + SLOT_W; x++)
       for (let y = r.gy + ROOM_H; y < r.gy + SLOT_H; y++) setFree(x, y);
-    for (let y = 0; y < r.gy; y++) { setFree(r.door.x, y); }     // door -> corridor
+    // corridor -> door, never above it: the band up there is not a thoroughfare
+    for (let y = CORRIDOR_Y; y < r.gy; y++) setFree(r.door.x, y);
   }
 }
 
@@ -307,14 +557,26 @@ function lineClear(ax, ay, bx, by) {
   return true;
 }
 
+/* Scan the leg OUTWARD and give up after SMOOTH_MISS consecutive failures, instead
+   of starting at the far end and stepping back one point at a time. The old walk
+   cost one lineClear per point of the whole remaining path for every leg it found —
+   O(n^2): a 277-point desk-to-cafeteria route burnt 973 calls and 7.8ms, which at
+   135 people walking is a ~1s stall. Every destination used to be inside the
+   walker's own room (<=25 points) so it never showed. Outward is linear in the path
+   and the miss budget still hops a lone pillar; past that the leg just ends a few
+   tiles early, which nobody can see. */
+const SMOOTH_MISS = 8;
 function smooth(pts) {
   if (pts.length < 3) return pts;
   const out = [pts[0]];
   let i = 0;
   while (i < pts.length - 1) {
-    let j = pts.length - 1;
-    while (j > i + 1 && !lineClear(pts[i].x, pts[i].y, pts[j].x, pts[j].y)) j--;
-    out.push(pts[j]); i = j;
+    let best = i + 1, miss = 0;          // neighbours are always clear, never tested
+    for (let j = i + 2; j < pts.length && miss < SMOOTH_MISS; j++) {
+      if (lineClear(pts[i].x, pts[i].y, pts[j].x, pts[j].y)) { best = j; miss = 0; }
+      else miss++;
+    }
+    out.push(pts[best]); i = best;
   }
   return out;
 }
@@ -333,10 +595,12 @@ function path(fx, fy, tx, ty) {
 
 const Floor = {
   N, E, S, W, ROOM_W, ROOM_H, SLOT_W, SLOT_H, DEPT_COLS, DEPT_PITCH, CORRIDOR_H,
-  state: F, ensureRoom, claimDesk, claimBoss, releaseDesk, hotDesk, takeSpot, releaseSpots,
-  path, walkable, bfs, lineClear,
+  AM_H, AM_GAP, AM_Y, AM_ROW_Y, AM_BAND, CORRIDOR_Y, ROOM_Y0,
+  state: F, ensureRoom, buildAmenities, claimDesk, claimBoss, releaseDesk, hotDesk,
+  takeSpot, releaseSpots, path, walkable, bfs, lineClear,
   reset() {
-    F.gw = F.gh = 0; F.blocked = null; F.rooms = {}; F.depts = {}; F._paths.clear();
+    F.gw = F.gh = 0; F.blocked = null; F.rooms = {}; F.depts = {};
+    F.amenities = []; F._paths.clear();
   },
 };
 

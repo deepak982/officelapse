@@ -7,8 +7,13 @@ Your Claude Code sessions, as an isometric office you can walk through — and r
 Every Claude Code session on your machine becomes a **team room**. The session itself is the
 boss at the head desk; every subagent it spawns is a **teammate** with their own desk, their
 own job title, and their own chair. Tool calls drive what they do — they type at their desk,
-walk to the filing cabinet to grep, report to the boss, take a break at the cooler, and walk
+walk to the filing cabinet to grep, report to the boss, wander up to the cafeteria, and walk
 out when the session goes quiet.
+
+They are animated characters in a real 3D office: eleven shared facilities across the top of
+the floor — reception, cafeteria, washrooms, lounge, boardroom, huddle rooms, phone booths,
+print bay, quiet room, IT, and a hot-desk bank for teams that outgrow their room — and a
+monitor that lights up when its owner is working.
 
 It reads your existing session logs. There is nothing to install into Claude Code.
 
@@ -42,7 +47,9 @@ cd officelapse
 ./run.sh
 ```
 
-Python 3 standard library only — no dependencies, no build step. It opens
+**No package manager, no build step.** The server is Python standard library only. The browser
+side vendors three.js into `vendor/` and its CC0 character assets into `assets/`, both
+committed — so a clone runs offline and `pip`/`npm` have nothing to do. It opens
 <http://localhost:8777>.
 
 ```bash
@@ -83,11 +90,15 @@ predate the `subagents/` directory will still render bosses, just without teamma
 | **Drag / scroll** | pan and zoom · **Fit** resets the view and clears the search |
 | **`/`** | search — matches department, session, branch, teammate and task text; Enter jumps to the first hit |
 | **Esc** | back out of a room |
-| **Click a bubble** | pin it so it stays up |
 | **LIVE** | follow the present · **⏸** pause · **1×…1800×** replay speed · **scrubber** jump anywhere in the window |
 
-Above 10× it switches to fast-forward: walks and bubbles are skipped, since nobody can walk
-thirty simulated minutes in one real second. The room chat keeps recording every line.
+Above 10× it switches to fast-forward: walks are skipped and poses freeze, since nobody can
+walk thirty simulated minutes in one real second. The room chat keeps recording every line.
+
+A **lit monitor** is the signal worth learning. Dark means nobody holds that desk; slate means
+its owner is logged on but has been quiet; bright cyan with a halo means they were working in
+the last 90 seconds — and it follows the *owner*, so a screen stays on while they are up at
+the cafeteria.
 
 ---
 
@@ -107,24 +118,35 @@ thirty simulated minutes in one real second. The room chat keeps recording every
 | `Read` / `Edit` / `Write` / `Bash` | typing at their desk |
 | `Grep` / `Glob` | a trip to the filing cabinet |
 | `Task` / `Agent` / `SendMessage` | walking over to the boss desk |
-| `WebFetch` / `WebSearch` | thinking, over by the cooler |
-| quiet for 90s | wanders off for a break |
+| `WebFetch` / `WebSearch` | thinking — at the cooler, the lounge or the quiet room |
+| quiet for 90s | a break: the room's cooler, the cafeteria or the lounge |
+| quiet for 5 min | some of them take a washroom run |
+| more teammates than desks | hot-desking up in the shared **HOT DESKS** room |
 | quiet for 15 min | clocks out and leaves through the door |
+
+Which break a given teammate takes is a hash of who they are, never random — so scrubbing back
+to the same moment rebuilds the same floor, down to who was standing where.
 
 ---
 
 ## How it works
 
-Four files, no framework, no build:
+No framework, no build step. Four layers, and only the last one knows what a pixel is:
 
-| File | Role |
-|---|---|
-| `server.py` | reads the jsonl incrementally by byte offset, serves `GET /api/state?since=<epoch>`. Python stdlib only |
-| `floor.js` | the building — departments, rooms, zones, desk claims, the walkability grid and BFS pathfinding. Pure, no DOM, runs under node for its tests |
-| `office.js` | the isometric renderer, the people, and their behaviour |
-| `chat.js` | speech bubbles (real DOM, so they can be hovered and pinned) and the per-room chat log |
+| | File | Role |
+|---|---|---|
+| **data** | `server.py` | reads the jsonl incrementally by byte offset, serves `GET /api/state?since=<seq>`. Python stdlib only |
+| **world** | `floor.js` | the building — departments, rooms, the facility band, desk claims, the walkability grid and BFS pathfinding |
+| | `sim.js` | who is on the floor, where they are walking, when they clock out. No DOM at all, so it runs under node |
+| **view** | `view3d/` | `scene.js` the office, `props.js` the furniture, `materials.js` the palette, `characters.js` the people, `input.js` hover and click |
+| | `office.js` | the original 2D canvas renderer, kept as the fallback when WebGL will not start |
+| | `chat.js` | the per-room chat log, and speech bubbles in the 2D view |
 
-Three details that matter if you read the code:
+The split is the point: `floor.js` and `sim.js` know nothing about how they are drawn, which is
+why a 3D renderer could be added beside the 2D one instead of replacing it. Both are driven by
+the same simulation, and `test_view3d.mjs` pins that they agree about who is where.
+
+Four details that matter if you read the code:
 
 - **Rooms never move.** A room takes a permanent slot on first sight and keeps it. Re-packing
   the floor whenever a team grows is what makes everyone teleport.
@@ -134,6 +156,10 @@ Three details that matter if you read the code:
   crosses and tests the tile on each interval, plus both shoulders at corner crossings. Stride
   sampling misses slices thinner than the stride, and smoothing tries the longest legs first —
   exactly where those slivers occur.
+- **The whole floor is 121 draw calls**, and that does not grow with room count. Every room is
+  geometrically identical, so shells, desks, chairs and props are instanced once and reused;
+  only a genuinely new prop footprint adds a batch. A session with 135 teammates renders 40
+  full rigs and 95 stand-ins, chosen by who you are looking at.
 
 ---
 
@@ -142,6 +168,8 @@ Three details that matter if you read the code:
 ```bash
 node test_floor.js       # floor plan + pathfinding
 node test_runtime.js     # desk overflow, recycling, queueing, room stability
+node test_sim.js         # who is on the floor: desks, breaks, facilities, replay
+node test_view3d.mjs     # the 3D layer, and that both views agree about the world
 python3 test_reader.py   # log reading: huge files, partial writes, odd sessions
 python3 test_labels.py   # tool call → what a worker says
 python3 test_tree.py     # boss → teammate tree, against your real logs
@@ -152,16 +180,24 @@ when a team grows, every desk and station reachable from the door, no path enter
 tile or cuts a blocked corner, desk claims stable across regrowth, queue spots never
 double-booked.
 
-**[EDGE_CASES.md](EDGE_CASES.md)** is the checklist these suites exist to cover — what happens
-when the logs are not tidy. Every entry was checked against real logs on a live machine or is
-pinned by a test, and the ones that are *not* handled are listed as plainly as the ones that
-are. Some highlights of what real data turned up:
+`test_view3d.mjs` runs the 3D layer headless — node has no WebGL, so `init()` and `render()`
+are the only things it cannot call. It slices `scene.js` out of its own source and runs it
+against fake batches, parses the real character rig off disk, and loads `office.js` into a `vm`
+to compare the two renderers directly: same prop vocabulary, same facility hues, same people at
+the same tiles, same rooms dimmed behind a focus, same rule for which monitors are lit. Where
+the two differ on purpose — bubbles are 2D-only, 3D labels are sprites — it says so.
 
-- session log files of **576MB** (read from the tail, not slurped)
-- **118 agent ids reused across different sessions** (so people are keyed by session + agent)
-- sessions with **135 subagents** against 24 desks (overflow hot-desks; desks recycle on
-  clock-out)
-- timestamps predating 2020, partial final lines, and 173k events sharing a single second
+**[EDGE_CASES.md](EDGE_CASES.md)** is the checklist these suites exist to cover — what happens
+when the logs are not tidy, and what the floor does when the world is not. Every entry names a
+check that pins it or a reproduction, and the ones that are *not* handled are listed as plainly
+as the ones that are. What real data turned up, all of it still handled:
+
+- session log files big enough that they are read from the tail, never slurped
+- agent ids reused across different sessions, so people are keyed by session **and** agent
+- sessions with more subagents than the room has desks — they hot-desk in the shared band, and
+  desks recycle on clock-out
+- timestamps predating 2020, partial final lines, and tens of thousands of events sharing one
+  second
 
 ---
 
@@ -180,7 +216,22 @@ the same machine can read `/api/state` while it runs, so don't leave it up on a 
 
 ## Requirements
 
-Python 3.8+ and a modern browser. Node is only needed for `test_floor.js`.
+**Nothing to install.** There are no third-party Python packages — `requirements.txt` is empty
+and says so — no npm packages, and no build step. What matters is versions:
+
+| | Needed | Why |
+|---|---|---|
+| **Python** | 3.8+ | the server. Standard library only: `glob`, `http.server`, `json`, `os`, `re`, `socketserver`, `threading`, `time`, `urllib.parse`, `datetime` |
+| **Browser** | Chrome/Edge 99+, Safari 16+, **Firefox 127+**, with WebGL2 | WebGL2 for the 3D office. The 2D fallback uses canvas `roundRect`, which Firefox only shipped in 127 (June 2024) |
+| **Node** | 18+ | only to run the four JS suites. Never needed to *use* officelapse |
+
+If WebGL will not start — no GPU, a blocked context, a missing vendor file — the page says so
+in the console and falls back to the 2D canvas renderer rather than showing a black rectangle.
+
+Third-party JavaScript is **vendored, not installed**: three.js r160 (MIT) in `vendor/`, and a
+CC0 character rig with its animation clips in `assets/`, both committed. The app works offline
+and a clone needs no package manager. Every source, author and licence is in
+[assets/CREDITS.md](assets/CREDITS.md).
 
 ## Licence
 

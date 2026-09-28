@@ -1,4 +1,6 @@
 /* office.js — the isometric view: painting, the camera, input and the frame loop.
+   Since view3d landed this is the FALLBACK view, not the default one — see the
+   #stage.three note above frame(), which is what stops it painting under the 3D view.
    The world it draws lives in sim.js; geometry and routing in floor.js; speech in
    chat.js. Everything below this header is pixels — if it does not draw, position
    or listen, it belongs in sim.js. */
@@ -13,15 +15,22 @@ const { N, E, S, W } = F;
 const { St, SPEEDS, IDLE, FF_ABOVE } = Sim;
 const { roomHit, roomName, personName, personText, shortLabel, clean, deptHue } = Sim;
 
-/* the sim speaks through these; wiring them is the view's job */
+/* the sim speaks through these; wiring them is the view's job.
+   The last argument is "show a bubble": false under the 3D view for the same reason
+   it is false above 10x replay — the bubble layer is 2D DOM over the 2D camera, and
+   chat.js logs the line either way. When the 3D view grows its own bubbles it drives
+   Chat.sync with its own projector and this drops the `&& !is3D`. */
 Sim.hooks.say = (p, text, isTask, simNow) =>
-  Chat.say(p, text, isTask, St.wall, simNow, !St.ff);
+  Chat.say(p, text, isTask, St.wall, simNow, !St.ff && !is3D);
 Sim.hooks.reset = () => Chat.clear();
 
 const cv = document.getElementById('cv'), cx = cv.getContext('2d');
 const el = id => document.getElementById(id);
 const lerp = (a, b, t) => a + (b - a) * t;
 const iso = (x, y) => ({ x: (x - y) * TW / 2, y: (x + y) * TH / 2 });
+/* tile inside a facility. p.room is a team room even for someone standing in the
+   cafeteria, so nothing about the band can be answered from the room. */
+const inAm = (a, x, y) => x >= a.gx && x < a.gx + a.w && y >= a.gy && y < a.gy + a.h;
 
 /* -------------------------------------------------------------- drawing --- */
 const shade = (h, s, l, a = 1) => `hsla(${h} ${s}% ${l}% / ${a})`;
@@ -56,13 +65,22 @@ function chair(x, y, dir) {
       15, '#333a4f', '#1f2431', '#272d3d');
 }
 
-function drawDesk(d, on, big) {
+/* state: 0 empty, 1 occupied, 2 active. Three, not a boolean, because a person sits
+   at their desk until GONE (900s) while activity only lasts IDLE (90s) — a binary
+   monitor leaves someone sitting at a dead screen for 810 of those seconds, which
+   reads as broken. Occupied is a muted slate, active the bright cyan plus the bloom;
+   the hue difference is what separates them at a glance, not the value. Matches the
+   3D view's rule exactly, and test_view3d.mjs X7 pins the two together. */
+function drawDesk(d, state, big) {
+  const on = state === 2;
   const w = big ? 1.7 : .98, dp = .76;
   box(d.x + .02, d.y + .1, w, dp, 13, '#3b4259', '#242a3b', '#2f3549');
   // monitor sits on the far side of the desk, so the occupant faces it
   const m = { x: d.x + w / 2 - .22, y: d.y + .14 };
-  box(m.x, m.y, .46, .08, on ? 17 : 15, on ? '#8bd9fb' : '#1c2130',
-      on ? '#3d7fa0' : '#141824', on ? '#5aa8cc' : '#191e2c');
+  box(m.x, m.y, .46, .08, on ? 17 : 15,
+      on ? '#8bd9fb' : state === 1 ? '#4f6780' : '#1c2130',
+      on ? '#3d7fa0' : state === 1 ? '#2b3949' : '#141824',
+      on ? '#5aa8cc' : state === 1 ? '#3b4d60' : '#191e2c');
   if (on) {
     const g0 = iso(m.x + .23, m.y);
     const g = cx.createRadialGradient(g0.x, g0.y - 16, 2, g0.x, g0.y - 16, 44);
@@ -70,6 +88,18 @@ function drawDesk(d, on, big) {
     cx.fillStyle = g; cx.beginPath(); cx.arc(g0.x, g0.y - 16, 44, 0, 7); cx.fill();
   }
 }
+
+/* Props that run along a wall arrive either 1xN or Nx1 — a sink down the west wall,
+   a planter wall, a bank of lockers. One screen point per cell, along the long axis,
+   so the detail repeats with the run instead of once per prop. */
+function runCells(pr) {
+  const w = pr.w || 1, h = pr.h || 1, horiz = w >= h, out = [];
+  for (let i = 0, n = Math.max(1, Math.round(Math.max(w, h))); i < n; i++)
+    out.push(iso(pr.x + (horiz ? i + .5 : w / 2), pr.y + (horiz ? h / 2 : i + .5)));
+  return out;
+}
+
+const noCase = new Set();               // one warning per unknown type, not per frame
 
 function drawProp(pr) {
   switch (pr.type) {
@@ -110,6 +140,80 @@ function drawProp(pr) {
       for (let i = 0; i < 3; i++) cx.fillRect(w0.x + 1, w0.y - 41 + i * 6, 14 - i * 4, 2);
       break;
     }
+    case 'counter':
+      // one slab and a raised lip: the old second box was wider AND taller than the
+      // first, so it hid it completely and cost a draw for nothing
+      box(pr.x + .04, pr.y + .1, pr.w - .08, .78, 25, '#6d6250', '#3a342a', '#4b4335');
+      box(pr.x + .04, pr.y + .76, pr.w - .08, .12, 27, '#7e7261', '#443d31', '#57503f');
+      break;
+    case 'coffee':
+      box(pr.x + .2, pr.y + .22, .6, .56, 30, '#3b4257', '#20242f', '#2b3040');
+      box(pr.x + .3, pr.y + .3, .4, .2, 34, '#1b1f29', '#12151c', '#161a22');
+      break;
+    case 'vending': {
+      box(pr.x + .12, pr.y + .18, .76, .64, 46, '#3a4560', '#1f2531', '#2a3243');
+      const v = iso(pr.x + .5, pr.y + .5);
+      cx.fillStyle = 'rgba(160,220,255,.5)';
+      cx.fillRect(v.x - 9, v.y - 44, 18, 22);      // sat 3px above the silhouette at -50
+      cx.fillStyle = '#e8b04b';
+      for (let i = 0; i < 3; i++) cx.fillRect(v.x - 6, v.y - 41 + i * 7, 12, 4);
+      break;
+    }
+    case 'stall':                         // a cubicle: walls you can see over
+      box(pr.x + .06, pr.y + .06, pr.w - .12, pr.h - .12, 30, '#46506b', '#252b3a', '#323a4e');
+      box(pr.x + .12, pr.y + pr.h - .28, pr.w - .24, .2, 34, '#5a6688', '#2c3345', '#3d4660');
+      break;
+    case 'sink':                          // the run is 1xN down a wall as often as Nx1,
+                                          // and the old loop over pr.w drew one basin for four
+      box(pr.x + .08, pr.y + .08, pr.w - .16, pr.h - .16, 20, '#49526c', '#262c3b', '#333a4e');
+      cx.fillStyle = '#c8d2e4';
+      for (const c of runCells(pr)) {
+        cx.beginPath(); cx.ellipse(c.x, c.y - 20, 8, 4.5, 0, 0, 7); cx.fill();
+      }
+      break;
+    case 'booth': {                       // phone booth: glass, so it reads as a box you sit in
+      box(pr.x + .12, pr.y + .1, pr.w - .24, pr.h - .2, 52, 'rgba(120,165,205,.34)',
+          'rgba(40,60,85,.55)', 'rgba(70,100,135,.45)');
+      const bo = iso(pr.x + pr.w / 2, pr.y + pr.h / 2);   // booths are 2x2 now, not 1xN
+      cx.strokeStyle = 'rgba(190,225,255,.5)'; cx.lineWidth = 1;
+      cx.strokeRect(bo.x - 11, bo.y - 56, 22, 42);
+      break;
+    }
+    case 'art': {                         // framed picture, hung on the wall behind it
+      // nine, because floor.js hands out art 0..8 and a 5-entry palette repeated
+      const ART = [['#e07a5f', '#3d405b'], ['#81b29a', '#2b3a55'], ['#e8b04b', '#5b3a52'],
+                   ['#6b9fd4', '#33405e'], ['#c76b8e', '#3a3350'], ['#5fbfae', '#24404a'],
+                   ['#b0a05f', '#3a3a2c'], ['#8f7fd4', '#2e2c4e'], ['#d4785f', '#4a2f2c']];
+      const pal = ART[(pr.art || 0) % ART.length];
+      const a0 = iso(pr.x + .5, pr.y + .5);
+      cx.fillStyle = '#20242f'; cx.fillRect(a0.x - 13, a0.y - 44, 26, 20);
+      cx.fillStyle = pal[0]; cx.fillRect(a0.x - 11, a0.y - 42, 22, 16);
+      cx.fillStyle = pal[1];
+      cx.beginPath(); cx.moveTo(a0.x - 11, a0.y - 26); cx.lineTo(a0.x + 1, a0.y - 36);
+      cx.lineTo(a0.x + 11, a0.y - 26); cx.closePath(); cx.fill();
+      break;
+    }
+    case 'logo': {
+      const l0 = iso(pr.x + .5, pr.y + .5);
+      cx.font = '700 11px ui-monospace,Menlo,monospace'; cx.textAlign = 'center';
+      cx.fillStyle = '#9fd3f0';
+      cx.fillText('OFFICELAPSE', l0.x, l0.y - 32);
+      break;
+    }
+    case 'menu': {
+      const m0 = iso(pr.x + .5, pr.y + .5);
+      cx.fillStyle = '#1b2029'; cx.fillRect(m0.x - 14, m0.y - 44, 28, 20);
+      cx.fillStyle = '#7fb59a';
+      for (let i = 0; i < 4; i++) cx.fillRect(m0.x - 11, m0.y - 40 + i * 4, 14 - i * 2, 2);
+      break;
+    }
+    case 'mirror': {
+      const r0 = iso(pr.x + .5, pr.y + .5);
+      cx.fillStyle = 'rgba(200,225,250,.28)'; cx.fillRect(r0.x - 12, r0.y - 42, 24, 18);
+      cx.strokeStyle = 'rgba(210,235,255,.5)'; cx.lineWidth = 1;
+      cx.strokeRect(r0.x - 12, r0.y - 42, 24, 18);
+      break;
+    }
     case 'plant': {
       const c0 = iso(pr.x + .5, pr.y + .5);
       box(pr.x + .3, pr.y + .3, .4, .4, 11, '#5b4636', '#33261c', '#432f23');
@@ -121,6 +225,86 @@ function drawProp(pr) {
       }
       break;
     }
+    case 'planter': {                     // a trough, not a pot: it runs a whole wall
+      box(pr.x + .1, pr.y + .1, pr.w - .2, pr.h - .2, 9, '#4b4336', '#2a251c', '#393227');
+      const cells = runCells(pr);
+      cells.forEach((c, i) => {
+        cx.fillStyle = i % 2 ? '#3f7d4f' : '#4a8c58';
+        cx.beginPath(); cx.ellipse(c.x, c.y - 13, 10, 6, 0, 0, 7); cx.fill();
+      });
+      break;
+    }
+    case 'roundtable': {                  // huddle pod: a round top on a pedestal
+      const rt = iso(pr.x + pr.w / 2, pr.y + pr.h / 2);
+      box(pr.x + pr.w / 2 - .17, pr.y + pr.h / 2 - .17, .34, .34, 12,
+          '#3a3350', '#221d31', '#2c2640');
+      cx.fillStyle = '#473e60';
+      cx.beginPath(); cx.ellipse(rt.x, rt.y - 12, pr.w * 25, pr.h * 12.5, 0, 0, 7); cx.fill();
+      cx.strokeStyle = '#272235'; cx.lineWidth = 1; cx.stroke();
+      break;
+    }
+    case 'longtable':                     // boardroom slab: heavier than a meeting table
+      box(pr.x + .06, pr.y + .12, pr.w - .12, pr.h - .24, 14, '#463b2e', '#281f18', '#372c22');
+      box(pr.x + .3, pr.y + pr.h / 2 - .1, pr.w - .6, .2, 15, '#5a4c3a', '#31281f', '#42372a');
+      break;
+    case 'chair':
+      // A chair is sat ON, and it does not block — so it stays low and open, or a
+      // person renders standing inside their own seat. No facing arrives with it.
+      box(pr.x + .3, pr.y + .3, .4, .4, 6, '#2f3547', '#1d2230', '#252b3a');
+      break;
+    case 'rack': {                        // server rack: tall, dark, covered in LEDs
+      box(pr.x + .16, pr.y + .1, pr.w - .32, pr.h - .2, 54, '#242935', '#14171f', '#1b1f29');
+      const rk = iso(pr.x + pr.w / 2, pr.y + pr.h / 2);
+      for (let i = 0; i < 10; i++) {                 // by position, so racks differ
+        cx.fillStyle = (pr.x + pr.y + i) % 3 ? '#4fd08a' : '#e8b04b';
+        cx.fillRect(rk.x - 7 + (i % 2) * 9, rk.y - 48 + ((i / 2) | 0) * 7, 5, 2.5);
+      }
+      break;
+    }
+    case 'screen': {                      // wall-mounted only: projector, or glazing
+      const sc = iso(pr.x + .5, pr.y + .5);
+      cx.fillStyle = 'rgba(18,22,30,.9)'; cx.fillRect(sc.x - 15, sc.y - 46, 30, 22);
+      cx.fillStyle = 'rgba(140,200,235,.2)'; cx.fillRect(sc.x - 13, sc.y - 44, 26, 18);
+      cx.strokeStyle = 'rgba(150,195,230,.45)'; cx.lineWidth = 1;
+      cx.strokeRect(sc.x - 15, sc.y - 46, 30, 22);
+      break;
+    }
+    case 'whiteboard': {                  // wall-mounted: the board, no stand ('board' has one)
+      const wb = iso(pr.x + .5, pr.y + .5);
+      cx.fillStyle = '#20242f'; cx.fillRect(wb.x - 16, wb.y - 46, 32, 24);
+      cx.fillStyle = '#e8edf5'; cx.fillRect(wb.x - 14, wb.y - 44, 28, 20);
+      cx.fillStyle = '#9aa4b8';
+      for (let i = 0; i < 3; i++) cx.fillRect(wb.x - 10, wb.y - 39 + i * 6, 18 - i * 5, 2);
+      break;
+    }
+    case 'locker':
+      box(pr.x + .12, pr.y + .14, pr.w - .24, pr.h - .28, 44, '#3d4659', '#20252f', '#2c3240');
+      for (const c of runCells(pr)) {
+        cx.strokeStyle = '#59637d'; cx.lineWidth = 1;
+        cx.strokeRect(c.x - 8, c.y - 40, 16, 28);
+        cx.fillStyle = '#8a93a8'; cx.fillRect(c.x + 4, c.y - 28, 2.5, 2.5);
+      }
+      break;
+    case 'bin': {                         // recycling, lidded
+      box(pr.x + .32, pr.y + .32, .36, .36, 15, '#2f4a3c', '#1a2a22', '#22382d');
+      const bn = iso(pr.x + .5, pr.y + .5);
+      cx.fillStyle = '#4b7a61';
+      cx.beginPath(); cx.ellipse(bn.x, bn.y - 15, 10, 5, 0, 0, 7); cx.fill();
+      break;
+    }
+    default:
+      // A missing case used to be an invisible prop over a blocked tile — people
+      // walking around nothing. Draw it hot pink and say so once.
+      if (!noCase.has(pr.type)) {
+        noCase.add(pr.type);
+        console.warn('drawProp: no case for prop type', pr.type);
+      }
+      box(pr.x + .2, pr.y + .2, (pr.w || 1) - .4, (pr.h || 1) - .4, 16,
+          'rgba(255,60,200,.55)', 'rgba(150,20,110,.55)', 'rgba(205,40,160,.55)');
+      cx.font = '700 8px ui-monospace,Menlo,monospace'; cx.textAlign = 'center';
+      cx.fillStyle = '#ff7ad8';
+      cx.fillText(String(pr.type || '?'), iso(pr.x + .5, pr.y + .5).x,
+                  iso(pr.x + .5, pr.y + .5).y - 22);
   }
 }
 
@@ -253,6 +437,69 @@ function drawRoomShell(r, dim) {
   cx.globalAlpha = 1;
 }
 
+/* A facility is not a department, so a department hue would be a lie — and a
+   cafeteria that looks like a washroom is the whole problem. Warm where people eat
+   and rest, cool and desaturated where they work or the machines live. */
+const AM_TINT = {
+  reception:   { h: 208, s: 26 },     // corporate blue
+  cafeteria:   { h: 28,  s: 40 },     // warm amber
+  washrooms:   { h: 190, s: 22 },     // pale tile cyan
+  lounge:      { h: 268, s: 24 },     // muted violet
+  boardroom:   { h: 6,   s: 26 },     // oxblood
+  huddle:      { h: 96,  s: 26 },     // green
+  phonebooths: { h: 168, s: 24 },     // teal
+  printbay:    { h: 44,  s: 22 },     // manila
+  wellness:    { h: 146, s: 28 },     // sage
+  serverroom:  { h: 222, s: 16 },     // cold steel
+  coworking:   { h: 322, s: 22 },     // magenta-grey
+};
+/* an unknown kind is a plain grey box, never a crash: floor.js may add a twelfth */
+const amTint = a => AM_TINT[a.kind] || { h: 220, s: 8 };
+
+/* A facility is never the focus and has no session to match a query against, so it
+   dims behind a focused room and behind a search it does not answer by name. */
+const amDim = a => !!St.focus ||
+  (!!St.q && !a.label.toLowerCase().includes(St.q) && !a.kind.includes(St.q));
+
+/* Same bones as drawRoomShell, but the door is on the SOUTH wall and every facility
+   is a different width, so nothing here may read a shared AM_W. */
+function drawAmenity(a, dim, busy) {
+  const t = amTint(a);
+  cx.globalAlpha = dim ? .1 : 1;
+
+  for (let x = 1; x < a.w - 1; x++) for (let y = 1; y < a.h - 1; y++)
+    tile(a.gx + x, a.gy + y, shade(t.h, t.s * .5, 20 + ((x + y) % 2 ? 1.8 : 0)),
+         'rgba(255,255,255,.025)');
+  if (a.door) tile(a.door.x, a.door.y, shade(t.h, t.s * .5, 23));   // the opening itself
+
+  // north and west walls full height, matching a team room. The south wall is only a
+  // sill: it is the wall the door is in, and a full one would hide the whole room.
+  for (let x = 0; x < a.w; x++)
+    box(a.gx + x, a.gy, 1, .16, 26, shade(t.h, t.s, 31), shade(t.h, t.s, 22), shade(t.h, t.s, 27));
+  for (let y = 0; y < a.h; y++)
+    box(a.gx, a.gy + y, .16, 1, 26, shade(t.h, t.s, 31), shade(t.h, t.s, 25), shade(t.h, t.s, 20));
+  const sy = a.gy + a.h - .16;
+  for (let x = 0; x < a.w; x++) {
+    if (a.door && a.gx + x === a.door.x) continue;
+    box(a.gx + x, sy, 1, .16, 7, shade(t.h, t.s, 28), shade(t.h, t.s, 20), shade(t.h, t.s, 24));
+  }
+  if (a.door) {                             // posts either side, so the doorway reads
+    const f = [shade(t.h, t.s + 24, 47), shade(t.h, t.s + 24, 35), shade(t.h, t.s + 24, 41)];
+    box(a.door.x - .06, sy, .12, .16, 14, f[0], f[1], f[2]);
+    box(a.door.x + .94, sy, .12, .16, 14, f[0], f[1], f[2]);
+  }
+
+  const n = iso(a.gx + a.w / 2, a.gy - 1.2);
+  cx.font = '600 12px ui-monospace,Menlo,monospace'; cx.textAlign = 'center';
+  const w = cx.measureText(a.label).width + 22;
+  cx.fillStyle = 'rgba(8,10,16,.92)';
+  cx.beginPath(); cx.roundRect(n.x - w / 2, n.y - 30, w, 21, 5); cx.fill();
+  cx.strokeStyle = busy ? shade(t.h, 62, 56) : '#2c3242'; cx.lineWidth = 1.1; cx.stroke();
+  cx.fillStyle = busy ? shade(t.h, 74, 72) : shade(t.h, 24, 56);
+  cx.fillText(a.label, n.x, n.y - 15);
+  cx.globalAlpha = 1;
+}
+
 function drawDepartments() {
   for (const proj in F.state.depts) {
     const d = F.state.depts[proj], hue = deptHue(proj);
@@ -308,9 +555,28 @@ function render() {
     const b = isoBox(r);
     return b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1;
   });
-  const shown = new Set(rooms);
+  // the band culls the same way: a facility is a static box that never moves, so the
+  // cached bbox applies to it unchanged
+  const ams = (F.state.amenities || []).filter(a => {
+    const b = isoBox(a);
+    return b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1;
+  });
+  const shown = new Set(rooms), shownAm = new Set(ams);
   const vis = r => !((St.focus && St.focus !== r) || !roomHit(r));
-  for (const r of rooms.sort((a, b) => (a.gx + a.gy) - (b.gx + b.gy))) drawRoomShell(r, !vis(r));
+
+  // Who is standing in the band, once per frame: the band's own culling and its
+  // name-plate highlight both need it, and p.room cannot answer it.
+  const inBand = new Map();
+  for (const k in St.people) {
+    const p = St.people[k], fa = p.fac || p.cowork;
+    if (fa && inAm(fa, p.x, p.y)) inBand.set(p, fa);
+  }
+  const busyFac = new Set(inBand.values());
+
+  // One depth-sorted pass over both: the band sits above the corridor but its east
+  // end still interleaves in screen depth with the west end of the first department.
+  for (const s of ams.concat(rooms).sort((a, b) => (a.gx + a.gy) - (b.gx + b.gy)))
+    s.kind ? drawAmenity(s, amDim(s), busyFac.has(s)) : drawRoomShell(s, !vis(s));
 
   // ONE depth-sorted pass over furniture and people together, so a person
   // standing behind a desk is occluded by it instead of painted over it
@@ -322,7 +588,8 @@ function render() {
     const occupant = d => d === r.boss
       ? St.people[r.sid + '|']
       : (d.by ? St.people[r.sid + '|' + d.by] : null);
-    const on = d => { const p = occupant(d); return !!p && St.clock - p.last < IDLE; };
+    // 0 empty, 1 the owner is logged on, 2 the owner was active within IDLE
+    const on = d => { const p = occupant(d); return !p ? 0 : (St.clock - p.last < IDLE ? 2 : 1); };
     for (const d of r.desks) {
       draws.push({ z: d.x + d.y, f: () => { cx.globalAlpha = dim ? .1 : 1; drawDesk(d, on(d), false); } });
       draws.push({ z: d.seat.x + d.seat.y - .01,
@@ -334,9 +601,26 @@ function render() {
     for (const pr of r.props) if (pr.type !== 'pod' && pr.type !== 'bossdesk')
       draws.push({ z: pr.x + pr.y, f: () => { cx.globalAlpha = dim ? .1 : 1; drawProp(pr); } });
   }
+  for (const a of ams) {
+    const dim = amDim(a);
+    for (const pr of a.props) if (pr.type !== 'pod' && pr.type !== 'bossdesk')
+      draws.push({ z: pr.x + pr.y, f: () => { cx.globalAlpha = dim ? .1 : 1; drawProp(pr); } });
+    // Hot desks only, and only on coworking. d.by here is the full sid|aid person key,
+    // not a bare agent id — the band is shared by every session at once. Prefixing
+    // a.sid + '|' the way the room pass does gives a key that can never match, and
+    // no monitor in the band would ever light up (EDGE_CASES H1, one layer up).
+    for (const d of a.desks || []) {
+      const who = d.by ? St.people[d.by] : null;
+      const on = !who ? 0 : (St.clock - who.last < IDLE ? 2 : 1);
+      draws.push({ z: d.x + d.y, f: () => { cx.globalAlpha = dim ? .1 : 1; drawDesk(d, on, false); } });
+    }
+  }
   for (const k in St.people) {
     const p = St.people[k];
-    if (!shown.has(p.room)) continue;
+    const fa = inBand.get(p);
+    if (fa ? !shownAm.has(fa) : !shown.has(p.room)) continue;
+    // dimmed by their OWN room either way: a teammate of the focused session stays lit
+    // while they are up at the cafeteria, which is the point of watching them go
     const dim = !vis(p.room);
     draws.push({ z: p.x + p.y, f: () => drawPerson(p, dim) });
   }
@@ -350,7 +634,8 @@ function render() {
 function bounds(rs) {
   let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
   for (const r of rs) {
-    const X0 = r.gx - 2, X1 = r.gx + F.ROOM_W + 2, Y0 = r.gy - 3, Y1 = r.gy + F.ROOM_H + 2;
+    // r.w/r.h, not ROOM_W/ROOM_H: facilities are each a different size
+    const X0 = r.gx - 2, X1 = r.gx + r.w + 2, Y0 = r.gy - 3, Y1 = r.gy + r.h + 2;
     for (const [a, b] of [[X0, Y0], [X1, Y0], [X0, Y1], [X1, Y1]]) {
       const p = iso(a, b);
       x0 = Math.min(x0, p.x - TW); x1 = Math.max(x1, p.x + TW);
@@ -367,7 +652,13 @@ function frameTo(rs, pad = .9, maxZ = 1.4) {
   St.cam.tx = (b.x0 + b.x1) / 2 + (St.focus ? 180 / St.cam.tz : 0);
   St.cam.ty = (b.y0 + b.y1) / 2;
 }
-const fitAll = () => frameTo(Object.values(F.state.rooms), .92, 1.0);
+/* The band belongs in the default frame or it sits off-screen above the corridor.
+   AM_BAND is derived at module load, so it is right before a facility object exists —
+   but the band is only built by the first ensureRoom(), so with no rooms there is
+   nothing up there to frame either. */
+const BAND = F.AM_BAND && { gx: F.AM_BAND.x, gy: F.AM_BAND.y, w: F.AM_BAND.w, h: F.AM_BAND.h };
+const fitAll = () => frameTo(Object.values(F.state.rooms)
+  .concat(BAND && (F.state.amenities || []).length ? [BAND] : []), .92, 1.0);
 
 function focusRoom(r) {
   St.focus = r;
@@ -377,6 +668,28 @@ function focusRoom(r) {
 }
 
 /* ---------------------------------------------------------------- loop --- */
+/* index.html layers the 3D canvas over this one and marks #stage.three, and that is
+   the normal path now: the 2D canvas is what a machine with no usable WebGL falls back
+   to. While the 3D view is up every pixel this file paints is hidden — render() was
+   building and sorting ~1,250 draws and issuing ~27,000 canvas operations a frame for
+   nobody. So the drawing and the bubble layout stop, and nothing else does: the sim,
+   the header, the clock, the scrubber, the empty-state banner, the side panel and the
+   room chat log all keep running, because the 3D view shows all of them. Bubbles go
+   the same way fast-forward takes them — hidden, still logged.
+
+   is3D is the only new top-level name: this is a classic script, so every binding up
+   here is a global shared with the other classic scripts. */
+let is3D = el('stage').classList.contains('three');
+new MutationObserver(() => {
+  const now3D = el('stage').classList.contains('three');
+  if (now3D === is3D) return;
+  is3D = now3D;
+  // Paint immediately on the way back: this canvas sits UNDER the 3D one and still
+  // holds whatever it last drew, which by then is minutes of world old. An observer
+  // callback runs before the browser paints, so that stale frame is never shown.
+  if (!is3D) render();
+}).observe(el('stage'), { attributes: true, attributeFilter: ['class'] });
+
 let prev = performance.now(), dragging = false, panning = null, roomCount = 0;
 const hhmmss = t => new Date(t * 1000).toLocaleTimeString();
 
@@ -391,14 +704,14 @@ function frame(now) {
   const c = St.cam, k = 1 - Math.exp(-6 * dt);
   c.x = lerp(c.x, c.tx, k); c.y = lerp(c.y, c.ty, k); c.z = lerp(c.z, c.tz, k);
 
-  render();
+  if (!is3D) render();
 
   if (Object.keys(F.state.rooms).length !== roomCount) {
     roomCount = Object.keys(F.state.rooms).length;
     if (!St.focus && !St.userMoved) fitAll();
   }
 
-  Chat.sync(St.people, (x, y) => {
+  if (!is3D) Chat.sync(St.people, (x, y) => {
     const s = iso(x, y), Wp = cv.clientWidth, Hp = cv.clientHeight;
     const sx = (s.x - St.cam.x) * St.cam.z + Wp / 2, sy = (s.y - St.cam.y) * St.cam.z + Hp / 2;
     return { x: sx, y: sy, off: sx < -160 || sx > Wp + 160 || sy < -80 || sy > Hp + 80 };
@@ -464,12 +777,23 @@ function resize() {
 }
 addEventListener('resize', resize);
 
-function pick(mx, my) {
+function tileAt(mx, my) {
   const Wp = cv.clientWidth, Hp = cv.clientHeight;
   const wx = (mx - Wp / 2) / St.cam.z + St.cam.x, wy = (my - Hp / 2) / St.cam.z + St.cam.y;
-  const ty = (wy / (TH / 2) - wx / (TW / 2)) / 2, tx = wy / (TH / 2) - ty;
+  const y = (wy / (TH / 2) - wx / (TW / 2)) / 2;
+  return { x: wy / (TH / 2) - y, y };
+}
+function pick(mx, my) {
+  const t = tileAt(mx, my);
   for (const r of Object.values(F.state.rooms))
-    if (tx >= r.gx && tx <= r.gx + F.ROOM_W && ty >= r.gy && ty <= r.gy + F.ROOM_H) return r;
+    if (t.x >= r.gx && t.x <= r.gx + r.w && t.y >= r.gy && t.y <= r.gy + r.h) return r;
+  return null;
+}
+/* Facilities are picked separately from rooms because they are not rooms: no session,
+   no teammates, no chat log, so nothing here may reach focusRoom(). */
+function pickAmenity(mx, my) {
+  const t = tileAt(mx, my);
+  for (const a of F.state.amenities || []) if (inAm(a, t.x, t.y)) return a;
   return null;
 }
 function toScreen(x, y) {
@@ -534,15 +858,34 @@ function tipFor(p, r) {
     </dl>`;
 }
 
+/* A facility is shared by every session, so it has no title, no branch and no log —
+   a name and a head count is the whole of what it can honestly say. */
+function tipForAmenity(a) {
+  const here = Object.values(St.people)
+    .filter(q => (q.fac || q.cowork) === a && inAm(a, q.x, q.y));
+  const desks = a.desks || [];
+  return `<div class="tk">Shared facility</div>
+    <h3>${esc(a.label)}</h3>
+    <dl>
+      ${row('here now', here.length + (here.length === 1 ? ' person' : ' people'))}
+      ${desks.length ? row('hot desks', desks.filter(d => d.by).length + ' of ' + desks.length + ' taken') : ''}
+      ${row('standing room', (a.seats || []).length + ' spots')}
+    </dl>`;
+}
+
 function showTip(mx, my) {
   const tip = el('tip');
   if (panning) { tip.classList.remove('on'); return; }
   const p = hitPerson(mx, my);
   const r = p ? null : pick(mx, my);
-  if (!p && !r) { tip.classList.remove('on'); cv.style.cursor = 'default'; return; }
-  cv.style.cursor = 'pointer';
-  const key = p ? p.key : 'room:' + r.sid;
-  if (tip.dataset.key !== key) { tip.dataset.key = key; tip.innerHTML = tipFor(p, r); }
+  const a = p || r ? null : pickAmenity(mx, my);
+  if (!p && !r && !a) { tip.classList.remove('on'); cv.style.cursor = 'default'; return; }
+  cv.style.cursor = a ? 'default' : 'pointer';      // a facility does not open on click
+  const key = p ? p.key : r ? 'room:' + r.sid : 'am:' + a.kind;
+  if (tip.dataset.key !== key) {
+    tip.dataset.key = key;
+    tip.innerHTML = a ? tipForAmenity(a) : tipFor(p, r);
+  }
   tip.classList.add('on');
 }
 cv.addEventListener('mousemove', e => showTip(e.offsetX, e.offsetY));
@@ -561,7 +904,11 @@ addEventListener('mousemove', e => {
 addEventListener('mouseup', e => {
   const p = panning; panning = null;
   if (!p || p.moved > 6) return;
-  const r = pick(e.offsetX ?? 0, e.offsetY ?? 0);
+  const mx = e.offsetX ?? 0, my = e.offsetY ?? 0;
+  const r = pick(mx, my);
+  // Clicking a facility does nothing: there is no session behind it to open a panel
+  // for, and treating it as a click on bare floor would drop the room you are reading.
+  if (!r && pickAmenity(mx, my)) return;
   focusRoom(r && r !== St.focus ? r : null);
 });
 cv.addEventListener('wheel', e => {
