@@ -49,7 +49,7 @@ function say(p, text, isTask, wallNow, simNow, showBubble) {
     C.bubbles.set(p.key, b);
   }
   if (b.text !== text) {
-    b.el.innerHTML = `<i>${esc(p.boss ? 'BOSS' : (p.aid || '').slice(1, 6))}</i>${esc(text)}`;
+    b.el.innerHTML = `<i>${esc(p.boss ? 'BOSS' : (p.display || (p.aid || '').slice(1, 6)))}</i>${esc(text)}`;
     b.text = text;
     b.el.classList.remove('in'); void b.el.offsetWidth; b.el.classList.add('in');
   }
@@ -63,7 +63,7 @@ function logLine(p, text, isTask, simNow) {
   const last = L.msgs[L.msgs.length - 1];
   if (last && last.text === text && last.key === p.key) return;
   L.msgs.push({ t: simNow, key: p.key, boss: p.boss,
-                who: p.boss ? 'BOSS' : (p.aid || '').slice(1, 7),
+                who: p.boss ? 'BOSS' : (p.display || (p.aid || '').slice(1, 7)),
                 name: p.name || '', hue: p.hue, text, task: !!isTask });
   if (L.msgs.length > LOG_MAX) L.msgs.shift();
   L.ver++;

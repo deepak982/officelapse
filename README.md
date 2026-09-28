@@ -139,15 +139,28 @@ Three details that matter if you read the code:
 ## Tests
 
 ```bash
-node test_floor.js      # floor plan + pathfinding, 11 checks
-python3 test_labels.py  # tool call → what a worker says
-python3 test_tree.py    # boss → teammate tree, against your real logs
+node test_floor.js       # floor plan + pathfinding
+node test_runtime.js     # desk overflow, recycling, queueing, room stability
+python3 test_reader.py   # log reading: huge files, partial writes, odd sessions
+python3 test_labels.py   # tool call → what a worker says
+python3 test_tree.py     # boss → teammate tree, against your real logs
 ```
 
-`test_floor.js` pins the invariants the module exists for: no room overlaps, rooms never move
+`test_floor.js` pins the invariants the floor exists for: no room overlaps, rooms never move
 when a team grows, every desk and station reachable from the door, no path enters a blocked
 tile or cuts a blocked corner, desk claims stable across regrowth, queue spots never
 double-booked.
+
+**[EDGE_CASES.md](EDGE_CASES.md)** is the checklist these suites exist to cover — what happens
+when the logs are not tidy. Every entry was checked against real logs on a live machine or is
+pinned by a test, and the ones that are *not* handled are listed as plainly as the ones that
+are. Some highlights of what real data turned up:
+
+- session log files of **576MB** (read from the tail, not slurped)
+- **118 agent ids reused across different sessions** (so people are keyed by session + agent)
+- sessions with **135 subagents** against 24 desks (overflow hot-desks; desks recycle on
+  clock-out)
+- timestamps predating 2020, partial final lines, and 173k events sharing a single second
 
 ---
 

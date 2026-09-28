@@ -21,19 +21,25 @@ const iso = (x, y) => ({ x: (x - y) * TW / 2, y: (x + y) * TH / 2 });
 
 /* a hash is not a name: trim a title or a task brief to something a human reads */
 function shortLabel(s, n = 20) {
-  s = String(s || '').replace(/[`"'“”]/g, '').replace(/\s+/g, ' ').trim();
+  s = String(s || '').replace(/[`"'“”*_]/g, '').replace(/\s+/g, ' ').trim();
   if (!s) return '';
   if (s.length <= n) return s;
   const cut = s.slice(0, n), sp = cut.lastIndexOf(' ');
   return (sp > 9 ? cut.slice(0, sp) : cut).replace(/[ ,.:;-]+$/, '') + '…';
 }
+/* briefs arrive as markdown; clean them at the door so no consumer has to */
+const clean = t => String(t || '').replace(/[*_`]|[“”]/g, '').replace(/\s+/g, ' ').trim();
+
 const roomName = r => {
   const s = St.sessions[r.sid] || {};
   return shortLabel(s.title, 26) || (s.branch ? '⎇ ' + shortLabel(s.branch, 20) : '') || r.proj;
 };
 function taskLabel(str, n = 22) {
-  const t = String(str || '').replace(/[`"'“”]/g, '').replace(/\s+/g, ' ').trim();
+  const t = String(str || '').replace(/[`"'“”*_]/g, '').replace(/\s+/g, ' ').trim();
   if (!t) return '';
+  // a brief that names its worker ("Nikhil, role: tester, ...") — use the name
+  const named = t.match(/^([A-Z][a-z]{2,15})\s*,\s*(?:role|a|an|the)\b/);
+  if (named) return named[1];
   const words = t.split(' ');
   // an identifier beats a bare acronym: "MR" matches earlier than "!2798" but
   // says nothing, and every sibling agent shares it
@@ -60,7 +66,7 @@ const St = {
   sessions: {}, agentMeta: {}, events: [], people: {},
   t0: 0, t1: 0, clock: 0, live: true, playing: true, si: 2, cursor: 0, since: 0,
   cam: { x: 0, y: 0, z: .5, tx: 0, ty: 0, tz: .5 },
-  focus: null, q: '', dpr: 1, userMoved: false, ff: false, wall: 0,
+  focus: null, q: '', dpr: 1, userMoved: false, ff: false, wall: 0, health: null,
 };
 
 /* ---------------------------------------------------------------- data --- */
@@ -69,6 +75,7 @@ async function poll() {
     const d = await (await fetch('/api/state?since=' + St.since)).json();
     Object.assign(St.sessions, d.sessions);
     Object.assign(St.agentMeta, d.agents);
+    St.health = d.health || null;
     if (!St.t0) { St.t0 = d.start; St.clock = d.now; }
     St.t1 = d.now;
     if (d.events.length) {
@@ -83,8 +90,10 @@ async function poll() {
 const deptHue = proj => DEPT_HUES[hash(proj) % DEPT_HUES.length];
 
 /* -------------------------------------------------------------- people --- */
+const pkey = e => e.sid + '|' + (e.aid || '');     // agent ids repeat across sessions
+
 function personFor(e) {
-  const key = e.aid || e.sid;
+  const key = pkey(e);
   let p = St.people[key];
   if (p) return p;
   const s = St.sessions[e.sid] || { proj: '?', agents: [] };
@@ -92,7 +101,9 @@ function personFor(e) {
   const boss = !e.aid;
   const desk = boss ? F.claimBoss(room, e.sid)
                     : (F.claimDesk(room, e.aid) || F.hotDesk(room, e.aid));
-  const meta = e.aid ? (St.agentMeta[e.aid] || {}) : s;
+  const meta = e.aid
+    ? (St.agentMeta[e.sid + '/' + e.aid] || St.agentMeta[e.aid] || {})
+    : s;
   const h = hash(key);
   p = St.people[key] = {
     key, sid: e.sid, aid: e.aid, boss, room,
@@ -104,7 +115,7 @@ function personFor(e) {
     state: 'walk', act: 'type', face: S, arriveFace: S,
     phase: (h % 628) / 100, bob: (h % 314) / 100,
     last: 0, breakAt: 0, tripAt: -1e9,
-    name: boss ? (s.title || e.sid.slice(0, 8)) : (meta.name || e.aid.slice(0, 9)),
+    name: clean(boss ? (s.title || e.sid.slice(0, 8)) : (meta.name || e.aid.slice(0, 9))),
     model: (meta.model || '').replace(/^claude-/, '').split('-')[0] || '',
   };
   return p;
@@ -159,6 +170,7 @@ function apply(e) {
   if (!p.dest || p.dest.x !== tx || p.dest.y !== ty) goTo(p, tx, ty, act, face);
   p.last = e.t;
   p.room.lastT = e.t;
+  p.display = personName(p);
   p.saying = e.kind === 'prompt' ? '“' + e.say + '”' : e.say;
   Chat.say(p, p.saying, e.kind === 'prompt', St.wall, e.t, !St.ff);
 }
@@ -538,7 +550,12 @@ function render() {
   const draws = [];
   for (const r of rooms) {
     const dim = !vis(r);
-    const on = d => d.by && St.people[d.by] && St.clock - St.people[d.by].last < IDLE;
+    // desks hold a bare agent id, but people are keyed session|agent (ids repeat
+    // across sessions) — resolve through the room, or no monitor ever lights up
+    const occupant = d => d === r.boss
+      ? St.people[r.sid + '|']
+      : (d.by ? St.people[r.sid + '|' + d.by] : null);
+    const on = d => { const p = occupant(d); return !!p && St.clock - p.last < IDLE; };
     for (const d of r.desks) {
       draws.push({ z: d.x + d.y, f: () => { cx.globalAlpha = dim ? .1 : 1; drawDesk(d, on(d), false); } });
       draws.push({ z: d.seat.x + d.seat.y - .01,
@@ -631,7 +648,14 @@ function frame(now) {
   el('nteam').textContent = Object.keys(F.state.rooms).length;
   el('nsub').textContent = team;
   el('dot').classList.toggle('on', act > 0);
-  el('empty').style.display = roomCount ? 'none' : 'grid';
+  const emptyEl = el('empty');
+  emptyEl.style.display = roomCount ? 'none' : 'grid';
+  if (!roomCount) {
+    const h = St.health;
+    emptyEl.className = 'empty' + (h && h.code === 'unreadable_format' ? ' bad' : '');
+    emptyEl.textContent = h && !h.ok ? h.message
+      : 'no sessions in the window — start a Claude session and watch';
+  }
   el('clock').textContent = hhmmss(St.clock);
   el('ff').classList.toggle('on', St.ff);
   if (St.t1 > St.t0 && !dragging)
@@ -709,8 +733,9 @@ function tipFor(p, r) {
     const s = St.sessions[p.sid] || {};
     const seat = p.boss ? 'boss desk' : (p.room.claims[p.aid] !== undefined ? 'desk #' + (p.room.claims[p.aid] + 1) : 'hot desk');
     return `<div class="tk">${p.boss ? 'Boss · this session' : 'Teammate · subagent'}</div>
-      <h3>${esc(p.boss ? (s.title || 'untitled session') : (p.name || 'a task'))}</h3>
+      <h3>${esc(p.boss ? clean(s.title) || 'untitled session' : (p.display || personName(p)))}</h3>
       <dl>
+        ${p.boss ? '' : row('task', p.name)}
         ${row(p.boss ? 'session' : 'agent id', p.boss ? p.sid : p.aid)}
         ${p.boss ? '' : row('reports to', (s.title ? shortLabel(s.title, 26) + ' · ' : '') + p.sid.slice(0, 8))}
         ${row('department', p.room.proj)}
@@ -727,7 +752,7 @@ function tipFor(p, r) {
   const s = St.sessions[r.sid] || {};
   const here = Object.values(St.people).filter(q => q.room === r);
   return `<div class="tk">Team room</div>
-    <h3>${esc(s.title || 'untitled session')}</h3>
+    <h3>${esc(clean(s.title) || 'untitled session')}</h3>
     <dl>
       ${row('session', r.sid)}
       ${row('department', r.proj)}
