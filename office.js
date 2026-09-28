@@ -90,12 +90,13 @@ function personFor(e) {
   const s = St.sessions[e.sid] || { proj: '?', agents: [] };
   const room = F.ensureRoom(e.sid, s.proj || '?');
   const boss = !e.aid;
-  const desk = boss ? F.claimBoss(room, e.sid) : F.claimDesk(room, e.aid);
+  const desk = boss ? F.claimBoss(room, e.sid)
+                    : (F.claimDesk(room, e.aid) || F.hotDesk(room, e.aid));
   const meta = e.aid ? (St.agentMeta[e.aid] || {}) : s;
   const h = hash(key);
   p = St.people[key] = {
     key, sid: e.sid, aid: e.aid, boss, room,
-    desk: desk || room.boss,
+    desk,
     hue: boss ? deptHue(s.proj || '?') : (h % 360),
     x: room.door.x + .5, y: room.door.y + .5,
     path: null, pi: 0, dest: null, speed: 2.0 + (h % 40) / 100,
@@ -163,7 +164,11 @@ function apply(e) {
 }
 
 function rebuild(to) {
-  for (const k in St.people) F.releaseSpots(St.people[k].room, k);
+  for (const k in St.people) {
+    const p = St.people[k];
+    F.releaseSpots(p.room, k);
+    if (!p.boss && p.aid) F.releaseDesk(p.room, p.aid);
+  }
   St.people = {};
   Chat.clear();
   St.cursor = 0;
@@ -252,7 +257,7 @@ function step(dt) {
 
 function exit(p) {
   F.releaseSpots(p.room, p.key);
-  if (p.desk && p.desk.by === p.aid) { /* keep the claim so they return to the same desk */ }
+  if (!p.boss && p.aid) F.releaseDesk(p.room, p.aid);   // clocked out: free the desk
   delete St.people[p.key];
 }
 

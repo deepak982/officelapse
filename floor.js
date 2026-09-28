@@ -188,6 +188,26 @@ function claimBoss(room, sid) {
   return room.boss;
 }
 
+/* A teammate who has clocked out frees their desk for the next one. Sessions on
+   this machine reach 135 subagents over a day while only a handful are ever
+   active at once, so without this every desk leaks and later arrivals get none. */
+function releaseDesk(room, aid) {
+  const i = room.claims[aid];
+  if (i === undefined) return;
+  if (room.desks[i] && room.desks[i].by === aid) room.desks[i].by = null;
+  delete room.claims[aid];
+}
+
+/* Genuinely more concurrent teammates than desks: stand them in the break and
+   meeting areas rather than stacking them onto the boss's chair. */
+function hotDesk(room, aid) {
+  const spots = room.break.concat(room.meet);
+  let h = 0;
+  for (const c of String(aid)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const s = spots[h % spots.length];
+  return { x: s.x, y: s.y, seat: { x: s.x, y: s.y }, dir: N, by: aid, hot: true };
+}
+
 /* ------------------------------------------------------------- queueing --- */
 /* Shared stations hand out numbered standing spots instead of random jitter, so
    people line up rather than pile onto one tile. */
@@ -313,7 +333,7 @@ function path(fx, fy, tx, ty) {
 
 const Floor = {
   N, E, S, W, ROOM_W, ROOM_H, SLOT_W, SLOT_H, DEPT_COLS, DEPT_PITCH, CORRIDOR_H,
-  state: F, ensureRoom, claimDesk, claimBoss, takeSpot, releaseSpots,
+  state: F, ensureRoom, claimDesk, claimBoss, releaseDesk, hotDesk, takeSpot, releaseSpots,
   path, walkable, bfs, lineClear,
   reset() {
     F.gw = F.gh = 0; F.blocked = null; F.rooms = {}; F.depts = {}; F._paths.clear();
