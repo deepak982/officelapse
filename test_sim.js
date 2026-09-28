@@ -527,6 +527,32 @@ check('S18', 'no facility ever holds more people than it has seats', () => {
     `the washrooms never filled (peak ${peak} of ${wash.seats.length}), so the cap is untested`);
 });
 
+check('S19', 'a brief that names its worker renders as that name', () => {
+  /* Briefs overwhelmingly open "You are Priya, Senior Backend Engineer, ...". The
+     name is the useful half — without this the plate reads "You are Priya…" and
+     every sibling agent looks alike at a glance. */
+  for (const [brief, want] of [
+    ['You are Anjali, Lighting & Art Direction Engineer on the 3D build.', 'Anjali'],
+    ['You are Priya, Senior Backend Engineer, reviewing server.py', 'Priya'],
+    ["You're Dev, Performance Engineer. You own office.js.", 'Dev'],
+    ['Nikhil, role: tester, files under src/', 'Nikhil'],
+    ['Farah, a QA engineer working on edge cases', 'Farah'],
+    ['Vikram, 2D Renderer Engineer', 'Vikram'],
+  ]) assert.strictEqual(Sim.taskLabel(brief), want, 'brief: ' + brief);
+
+  /* and the other way: a task that merely opens with a capitalised word and a comma
+     must NOT be read as a person. Inventing a teammate called Trace is worse than
+     failing to shorten a real name. */
+  for (const brief of [
+    'Trace, the margin regression in the PDF renderer',
+    'Review the changed files for correctness bugs',
+    'Fix the washroom pile-up in sim.js',
+  ]) {
+    const got = Sim.taskLabel(brief);
+    assert(/[ \u2026]/.test(got), `"${brief}" collapsed to a bare name: ${JSON.stringify(got)}`);
+  }
+});
+
 /* ---------------------------------------------------------------- done --- */
 if (FAILS.length) {
   console.log('\n%d check(s) failed: %s', FAILS.length, FAILS.join(', '));

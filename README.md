@@ -136,6 +136,31 @@ the cafeteria.
 Which break a given teammate takes is a hash of who they are, never random — so scrubbing back
 to the same moment rebuilds the same floor, down to who was standing where.
 
+### Name your agents and they get name plates
+
+A teammate's job title comes from the **first line of their brief**, so what you write when you
+spawn a subagent is what you read over their head on the floor. If the brief opens by naming
+the worker, officelapse uses that name:
+
+```
+You are Priya, Senior Backend Engineer, reviewing server.py   →   Priya
+Anjali, Lighting & Art Direction Engineer                     →   Anjali
+Nikhil, role: tester, files under src/                        →   Nikhil
+Farah, a QA engineer working on edge cases                    →   Farah
+```
+
+It wants `Name,` followed by a role — either `role:`, `a`/`an`, or a capitalised word. A leading
+`You are` / `You're` is stripped first, because that is how most briefs actually open.
+
+Without a name it falls back to shortening the task itself, which still works but reads worse:
+five agents all briefed *"Review the changed files for…"* become five people wearing the same
+label, and you cannot tell who is who.
+
+Deliberately **not** matched: `Trace, the margin regression`. A task that happens to start with
+a capitalised word and a comma must not become a teammate called Trace — the article `the` is
+excluded for exactly this reason. Failing to shorten a real name costs you a truncated plate;
+the other way round invents a colleague who does not exist. Pinned by `test_sim.js` S19.
+
 ---
 
 ## How it works

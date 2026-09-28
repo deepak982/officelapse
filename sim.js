@@ -44,10 +44,19 @@ const roomName = r => {
   return shortLabel(s.title, 26) || (s.branch ? '⎇ ' + shortLabel(s.branch, 20) : '') || r.proj;
 };
 function taskLabel(str, n = 22) {
-  const t = String(str || '').replace(/[`"'“”*_]/g, '').replace(/\s+/g, ' ').trim();
+  let t = String(str || '').replace(/[`"'“”*_]/g, '').replace(/\s+/g, ' ').trim();
   if (!t) return '';
-  // a brief that names its worker ("Nikhil, role: tester, ...") — use the name
-  const named = t.match(/^([A-Z][a-z]{2,15})\s*,\s*(?:role|a|an|the)\b/);
+  // "You are Priya, Senior Backend Engineer" is how a brief usually opens, and the
+  // name is the useful half — strip the preamble before looking for it
+  // note the apostrophe is already stripped above, so "You're" arrives as "Youre"
+  t = t.replace(/^(?:you(?:'?re| are)|your name is)\s+/i, '');
+  /* A brief that names its worker: "Nikhil, role: tester", "Farah, a QA engineer",
+     "Anjali, Lighting & Art Direction Engineer". What follows the comma has to be
+     "role", "a"/"an", or a capitalised word — deliberately NOT "the", because
+     "Trace, the margin regression" is a task and would read as a person called
+     Trace. Failing to shorten a name is a truncated label; the other way round
+     invents a teammate who does not exist. */
+  const named = t.match(/^([A-Z][a-z]{2,15})\s*,\s*(?:(?:role|an?)\b|(?=[A-Z0-9]))/);
   if (named) return named[1];
   const words = t.split(' ');
   // an identifier beats a bare acronym: "MR" matches earlier than "!2798" but
