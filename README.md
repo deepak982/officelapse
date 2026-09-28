@@ -17,6 +17,15 @@ monitor that lights up when its owner is working.
 
 It reads your existing session logs. There is nothing to install into Claude Code.
 
+> **Claude Code only.** This reads the session logs Claude Code writes to
+> `~/.claude/projects` — its own private JSONL format, one file per session plus a
+> `subagents/` directory beside it. Nothing else writes that format, so **Cursor, Copilot,
+> Aider, Codex, Windsurf, Cline and the rest will not show up on the floor**, and pointing
+> `OFFICELAPSE_ROOT` at their logs will get you an empty office, not an error. There is no
+> adapter for them and none is planned — the whole design leans on details only Claude Code
+> has, most of all the per-subagent log files that make a team a team here rather than one
+> anonymous "assistant".
+
 ---
 
 ## Why another agent office
@@ -221,6 +230,7 @@ and says so — no npm packages, and no build step. What matters is versions:
 
 | | Needed | Why |
 |---|---|---|
+| **Claude Code** | 2.1.x, with sessions on this machine | the only thing that writes the log format this reads. No other AI coding tool works — see the note at the top |
 | **Python** | 3.8+ | the server. Standard library only: `glob`, `http.server`, `json`, `os`, `re`, `socketserver`, `threading`, `time`, `urllib.parse`, `datetime` |
 | **Browser** | Chrome/Edge 99+, Safari 16+, **Firefox 127+**, with WebGL2 | WebGL2 for the 3D office. The 2D fallback uses canvas `roundRect`, which Firefox only shipped in 127 (June 2024) |
 | **Node** | 18+ | only to run the four JS suites. Never needed to *use* officelapse |
