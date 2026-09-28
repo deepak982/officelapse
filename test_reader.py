@@ -57,6 +57,7 @@ def reset(root):
     sv.ROOT = root
     sv._off.clear()
     sv._ev.clear()
+    sv._seen.clear()
     sv._ses.clear()
     sv._agents.clear()
     return root
@@ -179,6 +180,27 @@ def a6():
     sv.scan()
     assert sv._off[p] == os.path.getsize(p), sv._off[p]
     assert "grepping rotated" in says(), says()
+
+
+def a6b():
+    root = reset(newroot())
+    now = time.time()
+    p = os.path.join(root, "-Users-t-app", "s6b.jsonl")
+    old = [tool_row(now - 300 + i * 10, "s6b", "Read", {"file_path": "/one%d.txt" % i})
+           for i in range(4)]
+    write(p, old)
+    sv.scan()
+    assert says() == ["reading one%d.txt" % i for i in range(4)], says()
+    big = sv._off[p]
+    # rotated: the first two rows come back verbatim, the rest is new, and the
+    # whole file is now shorter than the stored offset
+    write(p, old[:2] + [tool_row(now - 60, "s6b", "Grep", {"pattern": "afterturn"})])
+    assert os.path.getsize(p) < big, "fixture must shrink below the stored offset"
+    sv.scan()
+    assert says().count("reading one0.txt") == 1, says()
+    assert says().count("reading one1.txt") == 1, says()
+    assert says().count("grepping afterturn") == 1, says()
+    assert len(sv._ev) == 5, says()          # 4 from before + 1 genuinely new
 
 
 def a7():
@@ -348,6 +370,55 @@ def c6():
     assert [(e["sid"], e["aid"]) for e in sv._ev] == [("orphan-sid", "lone")], sv._ev
 
 
+def c8():
+    root = reset(newroot())
+    now = time.time()
+    sub = os.path.join(root, "-Users-t-app", "sesN", "subagents")
+    write(os.path.join(sub, "agent-A.jsonl"),
+          [user_row(now - 300, "sesN", "You are the child"),
+           tool_row(now - 250, "sesN", "Read", {"file_path": "/child.txt"})])
+    write(os.path.join(sub, "agent-A", "subagents", "agent-B.jsonl"),
+          [user_row(now - 200, "sesN", "You are the grandchild"),
+           tool_row(now - 100, "sesN", "Grep", {"pattern": "deep"})])
+    sv.scan()
+    assert "sesN/B" in sv._agents, "grandchild never read: %s" % list(sv._agents)
+    assert sv._agents["sesN/B"]["sid"] == "sesN", sv._agents["sesN/B"]
+    assert sv._agents["sesN/B"]["name"] == "the grandchild", sv._agents["sesN/B"]
+    assert sorted(sv._ses["sesN"]["agents"]) == ["A", "B"], sv._ses["sesN"]
+    seen = sorted((e["sid"], e["aid"], e["say"]) for e in sv._ev)
+    assert seen == [("sesN", "A", "reading child.txt"),
+                    ("sesN", "B", "grepping deep")], seen
+
+
+def c9():
+    root = reset(newroot())
+    now = time.time()
+    p = os.path.join(root, "-Users-t-app", "s9.jsonl")
+    named = tool_row(now - 200, "s9", "Grep", {"pattern": "sidework"}, model="claude-side")
+    named["isSidechain"] = True
+    named["agentId"] = "ghost"
+    anon = tool_row(now - 190, "s9", "Glob", {"pattern": "nameless"}, model="claude-side")
+    anon["isSidechain"] = True                      # no id of its own
+    write(p, [user_row(now - 300, "s9", "boss prompt"),
+              tool_row(now - 250, "s9", "Read", {"file_path": "/boss.txt"}),
+              user_row(now - 210, "s9", "You are the inline helper",
+                       isSidechain=True, agentId="ghost"),
+              named, anon,
+              tool_row(now - 100, "s9", "Write", {"file_path": "/boss2.txt"})])
+    sv.scan()
+    boss = [e["say"] for e in sv._ev if e["aid"] is None]
+    assert boss == ["boss prompt", "reading boss.txt", "writing boss2.txt"], boss
+    side = [(e["aid"], e["say"]) for e in sv._ev if e["aid"] is not None]
+    assert side == [("ghost", "grepping sidework"),
+                    ("inline", "hunting nameless")], side
+    assert sorted(sv._ses["s9"]["agents"]) == ["ghost", "inline"], sv._ses["s9"]
+    assert sv._agents["s9/ghost"]["name"] == "the inline helper", sv._agents["s9/ghost"]
+    assert sv._agents["s9/inline"]["name"] == "inline teammate", sv._agents["s9/inline"]
+    # the sidechain's model must not be written onto the boss
+    assert sv._agents["s9/ghost"]["model"] == "claude-side", sv._agents["s9/ghost"]
+    assert sv._ses["s9"]["model"] == "claude-boss", sv._ses["s9"]
+
+
 # --- D. time ----------------------------------------------------------------
 
 def d1():
@@ -415,6 +486,7 @@ def main():
         ("A5", "appended while read -> new events appear exactly once", a5),
         ("A5b", "partial final line -> held back, then parsed exactly once", a5b),
         ("A6", "truncated/rotated -> offset resets and re-reads", a6),
+        ("A6b", "rotated file re-read -> overlapping events stay single", a6b),
         ("A7", "malformed JSON line -> skipped, neighbours still parse", a7),
         ("A8", "zero-byte file -> skipped, no crash", a8),
         ("A10", "agent-*.jsonl at project top level -> read as a session", a10),
@@ -426,6 +498,8 @@ def main():
         ("C4", "agent with no opening brief -> no crash, name stays empty", c4),
         ("C5", "agent with zero tool calls -> no events, still registered", c5),
         ("C6", "agent whose parent session file is absent -> still attributed", c6),
+        ("C8", "subagent nested under a subagent -> found, joins the same session", c8),
+        ("C9", "inline isSidechain rows -> credited to a stand-in, not the boss", c9),
         ("D1", "timestamp before 2020 -> event dropped", d1),
         ("D2", "unparseable timestamp -> event dropped", d2),
         ("D4", "many events on one timestamp -> all kept, order stable", d4),

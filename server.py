@@ -38,6 +38,7 @@ CHUNK_MAX = 4 * 1024 * 1024
 
 _off = {}       # file path -> bytes already parsed
 _ev = []        # events, kept sorted by .t
+_seen = set()   # identity of every event in _ev, so a re-read cannot double-count
 _ses = {}       # session id -> boss metadata
 _agents = {}    # agent id  -> teammate metadata
 # Drift watch: officelapse reads a private log format. If a release renames fields
@@ -108,6 +109,29 @@ def _clean_task(text):
     return t[:52] or "a task"
 
 
+def _ident(e):
+    return e.get("uid") or (e["t"], e["sid"], e["aid"], e["tool"], e["say"])
+
+
+def _add(e):
+    """Append an event at most once.
+
+    A rotated or truncated file resets its offset to 0 and is read again from the
+    top, so rows already in the timeline arrive a second time. Identity is the
+    row's own uuid plus the tool's index within it -- exact, and 100% of rows on
+    a real machine carry one. A (time, session, agent, tool, label) tuple also
+    measured 0 collisions over 5032 real events, so this is not fixing a live
+    loss; it removes the possibility, since two identical calls in the same
+    second by the same agent are indistinguishable under the tuple. Falls back
+    to the tuple for rows with no uuid. Trimmed with _ev in scan(), so it stays
+    bounded by MAX_EVENTS.
+    """
+    k = _ident(e)
+    if k not in _seen:
+        _seen.add(k)
+        _ev.append(e)
+
+
 def _session(sid, d, proj):
     s = _ses.get(sid)
     if s is None:
@@ -162,13 +186,20 @@ def _parse(path, sid, aid, proj, cutoff):
             _health["unrecognised"] += 1
             continue
         s = _session(sid, d, proj)
-        key = f"{sid}/{aid}" if aid else None
-        if aid:
+        # Older Claude Code wrote a teammate's turns inline in the boss's own file,
+        # flagged isSidechain, instead of in subagents/. Credit those to a stand-in
+        # teammate so they do not inflate the boss.
+        raid = aid
+        if raid is None and d.get("isSidechain"):
+            raid = str(d.get("agentId") or d.get("sourceToolAssistantUUID") or "inline")
+        key = f"{sid}/{raid}" if raid else None
+        if raid:
             a = _agents.get(key)
             if a is None:
-                a = _agents[key] = {"aid": aid, "key": key, "sid": sid, "name": "", "model": ""}
-                if aid not in s["agents"]:
-                    s["agents"].append(aid)
+                a = _agents[key] = {"aid": raid, "key": key, "sid": sid, "model": "",
+                                    "name": "" if aid else "inline teammate"}
+                if raid not in s["agents"]:
+                    s["agents"].append(raid)
         t = _ts(d.get("timestamp"))
         kind, msg = d.get("type"), (d.get("message") or {})
         if kind not in ("user", "assistant"):
@@ -177,22 +208,25 @@ def _parse(path, sid, aid, proj, cutoff):
         if kind == "user":
             c = msg.get("content")
             if isinstance(c, str) and c.strip():
-                if aid:
-                    if not _agents[key]["name"]:          # first brief = the job title
+                if raid:
+                    if _agents[key]["name"] in ("", "inline teammate"):   # first brief = job title
                         _agents[key]["name"] = _clean_task(c)
                 elif t >= cutoff:
-                    _ev.append({"t": t, "sid": sid, "aid": None, "kind": "prompt",
-                                "tool": "", "say": c.strip().split("\n")[0][:70]})
+                    _add({"t": t, "sid": sid, "aid": None, "kind": "prompt",
+                          "tool": "", "say": c.strip().split("\n")[0][:70],
+                          "uid": d.get("uuid")})
         elif kind == "assistant":
             if msg.get("model"):
-                (_agents[key] if aid else s)["model"] = msg["model"]
+                (_agents[key] if raid else s)["model"] = msg["model"]
             if t < cutoff:
                 continue
-            for c in (msg.get("content") or []):
+            uu = d.get("uuid")
+            for ci, c in enumerate(msg.get("content") or []):
                 if isinstance(c, dict) and c.get("type") == "tool_use":
-                    _ev.append({"t": t, "sid": sid, "aid": aid, "kind": "tool",
-                                "tool": c.get("name", "?"),
-                                "say": label(c.get("name", "?"), c.get("input"))})
+                    _add({"t": t, "sid": sid, "aid": raid, "kind": "tool",
+                          "tool": c.get("name", "?"),
+                          "say": label(c.get("name", "?"), c.get("input")),
+                          "uid": "%s#%d" % (uu, ci) if uu else None})
 
 
 def scan():
@@ -203,15 +237,21 @@ def scan():
         _health["files"] += 1
         proj = _base(os.path.dirname(path)).split("-")[-1]
         _parse(path, _base(path)[:-6], None, proj, cutoff)
-    for path in glob.glob(os.path.join(ROOT, "*", "*", "subagents", "agent-*.jsonl")):
+    # Any depth: a teammate may itself spawn a team. A grandchild flattens into the
+    # same session's roster -- cheap, and nothing is silently dropped.
+    for path in glob.glob(os.path.join(ROOT, "**", "subagents", "agent-*.jsonl"),
+                          recursive=True):
+        rel = os.path.relpath(path, ROOT).split(os.sep)   # <proj>/<sid>/.../agent-*.jsonl
+        if len(rel) < 4:
+            continue                                      # no session directory above it
         _health["files"] += 1
-        sid = _base(os.path.dirname(os.path.dirname(path)))             # dir name == parent
-        proj = _base(os.path.dirname(os.path.dirname(os.path.dirname(path)))).split("-")[-1]
-        _parse(path, sid, _base(path)[6:-6], proj, cutoff)
+        _parse(path, rel[1], _base(path)[6:-6], rel[0].split("-")[-1], cutoff)
     _health["events"] += len(_ev) - n
     if len(_ev) != n:
         _ev.sort(key=lambda e: e["t"])
         if len(_ev) > MAX_EVENTS:
+            for e in _ev[:len(_ev) - MAX_EVENTS]:
+                _seen.discard(_ident(e))
             del _ev[:len(_ev) - MAX_EVENTS]
 
 

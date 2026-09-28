@@ -15,7 +15,7 @@ python3 test_reader.py && python3 test_labels.py && python3 test_tree.py
 |---|---|
 | `test_floor.js` | static geometry, desk orientation, path validity on a fresh floor |
 | `test_runtime.js` | live churn — oversize teams, desk recycling, queueing, interleaved growth |
-| `test_reader.py` | sections A, B, C1/C4/C5/C6, D1/D2/D4 against synthetic fixtures |
+| `test_reader.py` | sections A, B, C1/C4/C5/C6/C8/C9, D1/D2/D4 against synthetic fixtures (24 checks) |
 | `test_labels.py` | tool call → what a worker says |
 | `test_tree.py` | the boss → teammate tree against your real logs |
 
@@ -30,7 +30,7 @@ python3 test_reader.py && python3 test_labels.py && python3 test_tree.py
 | A3 | `CLAUDE_CONFIG_DIR` relocates `~/.claude` | ✅ honoured; `OFFICELAPSE_ROOT` overrides both |
 | A4 | **Very large session file** — *576MB and 445MB found* | ✅ first read starts from the tail (8MB), each pass capped at 4MB. Parses in 0.02s |
 | A5 | File being appended while it is read | ✅ parses only up to the last `\n`; resumes mid-line next poll |
-| A6 | File truncated or rotated under us | ⚠️ offset resets and it re-reads without crashing, but events already in the timeline are re-appended, so a rotation duplicates them |
+| A6 | File truncated or rotated under us | ✅ offset resets and it re-reads; appends are idempotent, keyed on the row's own uuid, so the re-read cannot double-count |
 | A7 | Malformed / partial JSON line | ✅ skipped per line, rest of the file still parses |
 | A8 | Zero-byte file | ✅ *0 found*; size == offset, skipped |
 | A9 | Symlinked log files | ✅ *0 found*; `glob` + `os.stat` follow them normally |
@@ -61,8 +61,8 @@ python3 test_reader.py && python3 test_labels.py && python3 test_tree.py
 | C5 | Agent that made zero tool calls | ✅ *3 found*; never walks in, but still counted in the room's all-time `×N` |
 | C6 | Agent whose parent session file is missing | ✅ *0 found*; the session record is created from the agent's own rows |
 | C7 | Agent that goes quiet then returns | ✅ clocks out, and is re-created at the door on its next event |
-| C8 | Nested subagents (an agent spawning its own team) | ⚠️ *0 exist today*; the reader is one level deep and would miss grandchildren |
-| C9 | Inline `isSidechain` rows inside a main session file (older format) | ⚠️ *0 found*; on an older install these would be attributed to the boss |
+| C8 | Nested subagents (an agent spawning its own team) | ✅ *0 exist today*; discovery is depth-independent, and a grandchild flattens into its session's team rather than being lost. Verified identical coverage on real logs (582 files before and after) |
+| C9 | Inline `isSidechain` rows inside a main session file (older format) | ✅ *0 found*; credited to a stand-in teammate rather than inflating the boss. Guarded so it cannot invent agents where none exist |
 
 ## D. Time and replay
 
