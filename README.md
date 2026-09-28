@@ -2,7 +2,7 @@
 
 Your Claude Code sessions, as an isometric office you can walk through — and rewind.
 
-![The floor](docs/floor.png)
+![The floor](docs/floor-3d.png)
 
 Every Claude Code session on your machine becomes a **team room**. The session itself is the
 boss at the head desk; every subagent it spawns is a **teammate** with their own desk, their
@@ -81,7 +81,7 @@ predate the `subagents/` directory will still render bosses, just without teamma
 
 ## Controls
 
-![Inside a room](docs/room.png)
+![Inside a room](docs/room-3d.png)
 
 | | |
 |---|---|
