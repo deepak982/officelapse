@@ -71,7 +71,10 @@ const St = {
 };
 
 /* ---------------------------------------------------------------- data --- */
+let polling = false;
 async function poll() {
+  if (polling) return;   // a scan slower than the interval must not stack requests
+  polling = true;
   try {
     const d = await (await fetch('/api/state?since=' + St.since)).json();
     Object.assign(St.sessions, d.sessions);
@@ -79,14 +82,32 @@ async function poll() {
     St.health = d.health || null;
     if (!St.t0) { St.t0 = d.start; St.clock = d.now; }
     St.t1 = d.now;
+    // A title or model can land on a row long after its owner is already on the
+    // floor, and both arrive as metadata, never as an event.
+    if (d.sessions || d.agents) relabel();
     if (d.events.length) {
-      St.since = Math.max(St.since, d.events[d.events.length - 1].t);
+      // seq, not t: the server stamps it on arrival, so a row read from a tail
+      // seek still carries a new high and is not filtered out for being old.
+      for (const e of d.events) St.since = Math.max(St.since, e.seq);
       St.events.push(...d.events);
       St.events.sort((a, b) => a.t - b.t);
       rewind();     // a late event may have landed behind where we have scanned
     }
     if (St.events.length) St.t0 = St.events[0].t - 60;
-  } catch (e) { /* server gone: keep animating what we have */ }
+  } catch (e) { /* server gone: keep animating what we have */
+  } finally { polling = false; }
+}
+
+/* late metadata -> the name already drawn over someone's head */
+function relabel() {
+  for (const k in St.people) {
+    const p = St.people[k];
+    const m = p.boss ? (St.sessions[p.sid] || {})
+                     : (St.agentMeta[p.sid + '/' + p.aid] || {});
+    const name = clean(p.boss ? m.title : m.name);
+    if (name && name !== p.name) { p.name = name; p.display = personName(p); }
+    if (!p.model && m.model) p.model = m.model.replace(/^claude-/, '').split('-')[0] || '';
+  }
 }
 
 const deptHue = proj => DEPT_HUES[hash(proj) % DEPT_HUES.length];
@@ -103,9 +124,7 @@ function personFor(e) {
   const boss = !e.aid;
   const desk = boss ? F.claimBoss(room, e.sid)
                     : (F.claimDesk(room, e.aid) || F.hotDesk(room, e.aid));
-  const meta = e.aid
-    ? (St.agentMeta[e.sid + '/' + e.aid] || St.agentMeta[e.aid] || {})
-    : s;
+  const meta = e.aid ? (St.agentMeta[e.sid + '/' + e.aid] || {}) : s;
   const h = hash(key);
   p = St.people[key] = {
     key, sid: e.sid, aid: e.aid, boss, room,
@@ -120,6 +139,7 @@ function personFor(e) {
     name: clean(boss ? (s.title || e.sid.slice(0, 8)) : (meta.name || e.aid.slice(0, 9))),
     model: (meta.model || '').replace(/^claude-/, '').split('-')[0] || '',
   };
+  p.display = personName(p);          // cached: it is 3 regex scans and a split
   return p;
 }
 
@@ -192,6 +212,9 @@ function rebuild(to) {
   }
   St.people = {};
   Chat.clear();
+  // lastT drives the room's busy glow and its "last active" line. Left standing it
+  // reports activity in the future for every room you scrub back past.
+  for (const k in F.state.rooms) delete F.state.rooms[k].lastT;
   for (const e of St.events) e.done = e.t <= to - GONE;
   rewind();
   St.catchUp = true;      // the backlog about to replay must not be walked out
@@ -384,8 +407,6 @@ function drawProp(pr) {
   }
 }
 
-const POSE = { type: 1, think: 0, file: 0, meet: 0, walk: 0, leaving: 0 };
-
 function drawPerson(p, dim) {
   const s = iso(p.x, p.y), walk = p.state === 'walk';
   const seated = p.state === 'type';
@@ -459,7 +480,7 @@ function drawPerson(p, dim) {
   cx.font = (p.boss ? '600 ' : '') + '9px ui-monospace,Menlo,monospace';
   cx.textAlign = 'center';
   cx.fillStyle = p.boss ? shade(p.hue, 60, 72) : (idle ? '#5a6076' : '#8891a8');
-  cx.fillText((p.boss ? '★ ' : '') + personName(p), bx, by + 17);
+  cx.fillText((p.boss ? '★ ' : '') + (p.display || personName(p)), bx, by + 17);
   cx.globalAlpha = 1;
 }
 
@@ -502,7 +523,8 @@ function drawRoomShell(r, dim) {
   }
 
   const s = St.sessions[r.sid] || {};
-  const label = roomName(r) + (s.agents && s.agents.length ? '  ×' + s.agents.length : '');
+  // all-time, not who is in there now — the header's "teammates" counts the living
+  const label = roomName(r) + (s.agents && s.agents.length ? '  ×' + s.agents.length + ' all-time' : '');
   const n = iso(r.gx + F.ROOM_W / 2, r.gy - 1.2);
   cx.font = '600 12px ui-monospace,Menlo,monospace'; cx.textAlign = 'center';
   const w = cx.measureText(label).width + 22;
@@ -542,6 +564,16 @@ function drawDepartments() {
   cx.globalAlpha = 1;
 }
 
+/* a room's screen box, computed once — rooms never move */
+function isoBox(r) {
+  if (r._bb) return r._bb;
+  const c = [iso(r.gx, r.gy), iso(r.gx + r.w, r.gy),
+             iso(r.gx, r.gy + r.h), iso(r.gx + r.w, r.gy + r.h)];
+  const xs = c.map(p => p.x), ys = c.map(p => p.y);
+  return (r._bb = { x0: Math.min(...xs) - 48, x1: Math.max(...xs) + 48,
+                    y0: Math.min(...ys) - 96, y1: Math.max(...ys) + 48 });
+}
+
 function render() {
   const Wp = cv.clientWidth, Hp = cv.clientHeight;
   cx.setTransform(St.dpr, 0, 0, St.dpr, 0, 0);
@@ -551,7 +583,15 @@ function render() {
 
   drawDepartments();
 
-  const rooms = Object.values(F.state.rooms);
+  // Only what the camera can see. Stepping into one room used to cost a full
+  // build and rasterise of every other room on the floor, at alpha .1.
+  const hx = Wp / 2 / St.cam.z, hy = Hp / 2 / St.cam.z;
+  const x0 = St.cam.x - hx, x1 = St.cam.x + hx, y0 = St.cam.y - hy, y1 = St.cam.y + hy;
+  const rooms = Object.values(F.state.rooms).filter(r => {
+    const b = isoBox(r);
+    return b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1;
+  });
+  const shown = new Set(rooms);
   const vis = r => !((St.focus && St.focus !== r) || !roomHit(r));
   for (const r of rooms.sort((a, b) => (a.gx + a.gy) - (b.gx + b.gy))) drawRoomShell(r, !vis(r));
 
@@ -578,7 +618,9 @@ function render() {
       draws.push({ z: pr.x + pr.y, f: () => { cx.globalAlpha = dim ? .1 : 1; drawProp(pr); } });
   }
   for (const k in St.people) {
-    const p = St.people[k], dim = !vis(p.room);
+    const p = St.people[k];
+    if (!shown.has(p.room)) continue;
+    const dim = !vis(p.room);
     draws.push({ z: p.x + p.y, f: () => drawPerson(p, dim) });
   }
   draws.sort((a, b) => a.z - b.z);
@@ -641,7 +683,7 @@ function frame(now) {
   // backlog drained once we are back to at most one event per frame: animate again
   if (St.catchUp && applied <= 1) St.catchUp = false;
 
-  step(St.ff ? dt : dt);
+  step(dt);
   render();
 
   if (Object.keys(F.state.rooms).length !== roomCount) {
@@ -693,15 +735,19 @@ function paintPanel(r) {
     const idle = St.clock - p.last > IDLE;
     return `<div class="row ${kid ? 'kid' : 'boss'}${idle ? ' off' : ''}">
       <span class="sw" style="background:hsl(${p.hue} 62% 52%)"></span>
-      <div class="rt"><b>${kid ? esc(personName(p)) : '★ ' + esc(personName(p))}</b>
+      <div class="rt"><b>${kid ? '' : '★ '}${esc(p.display || personName(p))}</b>
         <span>${esc(kid ? (p.name || '') : (p.aid || p.sid))}</span>
         <i>${esc(p.saying || (idle ? 'idle' : p.state))}</i></div></div>`;
   };
-  el('plist').innerHTML =
+  const html =
     (boss ? row(boss, false) : `<div class="row boss off"><div class="rt"><b>BOSS · ${esc(r.sid.slice(0, 8))}</b><span>${esc(s.title || '')}</span><i>away</i></div></div>`) +
     (team.map(p => row(p, true)).join('') ||
       '<div class="row kid off"><div class="rt"><b>no teammates</b><span>this boss works alone right now</span></div></div>');
+  // building the string is cheap; reparsing it 60x a second is not, and it kills
+  // text selection in the panel while you are trying to read it
+  if (html !== panelHtml) { el('plist').innerHTML = panelHtml = html; }
 }
+let panelHtml = '';
 
 /* ------------------------------------------------------------ controls --- */
 function resize() {

@@ -60,6 +60,10 @@ def reset(root):
     sv._seen.clear()
     sv._ses.clear()
     sv._agents.clear()
+    # the directory listing is cached at poll rate in normal use; these tests write
+    # files between scans, so they need to see the disk as it is right now
+    sv.GLOB_TTL = 0
+    sv._listed[:] = [0.0, [], [], 0, None]
     return root
 
 

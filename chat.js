@@ -5,8 +5,8 @@
 (function (root) {
 'use strict';
 
-const DWELL = 4.2;
-const MAX_LIFT = 96;      // px a bubble may be pushed above its speaker        // seconds of real time a bubble stays up
+const DWELL = 4.2;        // seconds of real time a bubble stays up
+const MAX_LIFT = 96;      // px a bubble may be pushed above its speaker
 const LOG_MAX = 200;      // messages kept per room
 
 const C = {
@@ -132,6 +132,10 @@ function renderLog(room, clockFmt) {
 function clear() {
   for (const [, b] of C.bubbles) b.el.remove();
   C.bubbles.clear();
+  // the logs go too: a rebuild replays the same events, and logLine only dedupes
+  // against the line immediately before it, so every room would say it all twice
+  C.logs.clear();
+  C.shownSid = null;
   C.shownVer = -1;
 }
 

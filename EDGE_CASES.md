@@ -28,7 +28,7 @@ python3 test_reader.py && python3 test_labels.py && python3 test_tree.py
 | A1 | Log directory does not exist (machine has never run Claude Code) | ✅ empty floor, no crash; banner says where it looked |
 | A2 | Log directory exists but is empty | ✅ empty floor |
 | A3 | `CLAUDE_CONFIG_DIR` relocates `~/.claude` | ✅ honoured; `OFFICELAPSE_ROOT` overrides both |
-| A4 | **Very large session file** — *576MB and 445MB found* | ✅ first read starts from the tail (8MB), each pass capped at 4MB. Parses in 0.02s |
+| A4 | **Very large session file** — *576MB and 445MB found* | ✅ any unread tail over 8MB is skipped to its last 8MB, each pass capped at 4MB. Parses in 0.02s. The same rule recovers a page left closed while the log ran away, which a first-read-only jump could never catch up with |
 | A5 | File being appended while it is read | ✅ parses only up to the last `\n`; resumes mid-line next poll |
 | A6 | File truncated or rotated under us | ✅ offset resets and it re-reads; appends are idempotent, keyed on the row's own uuid, so the re-read cannot double-count |
 | A7 | Malformed / partial JSON line | ✅ skipped per line, rest of the file still parses |
@@ -41,7 +41,7 @@ python3 test_reader.py && python3 test_labels.py && python3 test_tree.py
 
 | # | Case | Status |
 |---|---|---|
-| B1 | Session with no `aiTitle` | ✅ falls back to branch, then project name |
+| B1 | Session with no `aiTitle` | ✅ tries `customTitle` next (a real rename — sessions titled only that way showed the fallback), then branch, then project name |
 | B2 | Session with no `cwd` | ✅ project taken from the directory name |
 | B3 | Session with no `gitBranch` | ✅ field simply omitted from plate and card |
 | B4 | Session resumed later (same id, file appended) | ✅ incremental read picks up from the stored offset |
@@ -76,7 +76,7 @@ python3 test_reader.py && python3 test_labels.py && python3 test_tree.py
 | D6 | Activity occupying a tiny slice of the window | ✅ scrubber spans the *events*, not the empty window |
 | D7 | Replay at 1800× | ✅ fast-forward: walks and bubbles skipped, chat still recorded |
 | D8 | Event burst (139 in one minute) at high speed | ✅ per-frame event budget stops the loop stalling |
-| D9 | An older event arriving after the cursor passed it | ✅ "applied" is a flag on the event, not an index into an array that gets re-sorted every poll, so a late insert behind the scan position is still picked up (browser-verified, not headlessly pinned) |
+| D9 | An older event arriving after the cursor passed it | ✅ two halves. The server hands out a **sequence**, not a timestamp, so a row read from a tail seek carries a new high and is not filtered out for being old — a timestamp cursor dropped those permanently. Client-side, "applied" is a flag on the event, not an index into an array that gets re-sorted every poll (browser-verified, not headlessly pinned) |
 
 ## E. Floor and rendering
 
@@ -111,13 +111,27 @@ python3 test_reader.py && python3 test_labels.py && python3 test_tree.py
 
 officelapse reads Claude Code's private on-disk format (verified against 2.1.x:
 `<sessionId>.jsonl` plus `<sessionId>/subagents/agent-<id>.jsonl`, fields `timestamp`,
-`sessionId`, `cwd`, `gitBranch`, `aiTitle`, `message.content[].tool_use`). Nothing guarantees
-this is stable across releases.
+`sessionId`, `cwd`, `gitBranch`, `aiTitle`/`customTitle`, `message.content[].tool_use`).
+Nothing guarantees this is stable across releases. Names that have already moved once are
+listed together in `FIELDS`, so absorbing the next rename is a one-word edit.
 
-If files are present but none of their lines are recognised, the server says so on startup, the
-`/api/state` response carries a `health` object (`ok`, `code`, `message`, counts), and the page
-shows the reason in place of the empty-floor message. The three verdicts are `ok`, `no_logs`
-and `unreadable_format`.
+The server says so on startup, the `/api/state` response carries a `health` object (`ok`,
+`code`, `message`, counts), and the page shows the reason in place of the empty-floor message.
+The five verdicts:
 
-Note the discriminator is *recognised lines*, not event count — a machine whose activity all
-predates the window parses perfectly and yields zero events, and must not be accused of drift.
+| Verdict | Fires when |
+|---|---|
+| `no_logs` | no `.jsonl` found under the root at all |
+| `unreadable_format` | over 90% of the lines read this scan failed to parse or had no usable timestamp |
+| `no_tool_calls` | assistant turns in the window, but not one `tool_use` block among them — everyone on the floor is driven by tool calls, so the rooms would look asleep |
+| `no_subagents` | session directories exist but not one `subagents/agent-*.jsonl` inside any of them |
+| `ok` | none of the above |
+
+Each verdict is a ratio against what *this scan* read — the counters reset every scan, so a
+long-running server cannot mask a drift that starts mid-session behind hours of good lines.
+
+Note the discriminator is never event count — a machine whose activity all predates the window
+parses perfectly and yields zero events, and must not be accused of drift. `no_tool_calls` and
+`no_subagents` are the two partial drifts that used to pass as `ok`: each has a denominator
+(assistant turns, session directories) that is present on a healthy machine whatever the window
+holds, so neither can fire on a quiet one.

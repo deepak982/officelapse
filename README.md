@@ -49,8 +49,9 @@ Python 3 standard library only — no dependencies, no build step. It opens
 PORT=9000 HOURS=72 ./run.sh     # different port, wider time window
 ```
 
-`PORT` defaults to `8777`, `HOURS` to `24`. Logs go to `/tmp/officelapse.log`. Running it
-again kills the previous instance and rebinds, so it doubles as a restart.
+`PORT` defaults to `8777`, `HOURS` to `24`. Logs go to `$TMPDIR/officelapse.<uid>.log`, mode
+`600`. Running it again restarts the previous instance; if the port belongs to something
+that is not officelapse it says so and stops rather than killing it.
 
 It finds your session logs on its own, in this order:
 
@@ -101,7 +102,7 @@ thirty simulated minutes in one real second. The room chat keeps recording every
 |---|---|
 | project (working directory) | a **department** — its own carpet colour and sign |
 | session | a **team room** |
-| the session's `aiTitle` | the room's name, e.g. *MR 2908 review* |
+| the session's title | the room's name, e.g. *Invoice PDF rewrite* |
 | subagent | a **teammate**; their first brief becomes their job title |
 | `Read` / `Edit` / `Write` / `Bash` | typing at their desk |
 | `Grep` / `Glob` | a trip to the filing cabinet |
@@ -166,11 +167,14 @@ are. Some highlights of what real data turned up:
 
 ## Privacy
 
-It reads `~/.claude/projects` and never writes there. The server binds to `127.0.0.1` only.
-Nothing is uploaded and there is no telemetry — everything stays on your machine.
+It reads `~/.claude/projects` and never writes there. The server binds to `127.0.0.1` only,
+and rejects any request whose `Host` is not `localhost`/`127.0.0.1` — without that check a
+page in another tab could reach it by pointing its own hostname at `127.0.0.1`. Nothing is
+uploaded and there is no telemetry — everything stays on your machine.
 
 Session logs contain your prompts, file paths and shell commands, and this page displays them.
-Worth remembering before you screen-share it.
+Worth remembering before you screen-share it. There is no login: anyone with an account on
+the same machine can read `/api/state` while it runs, so don't leave it up on a shared box.
 
 ---
 
