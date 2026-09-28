@@ -64,9 +64,10 @@ const DEPT_HUES = [199, 152, 41, 280, 12, 326, 96, 255];
 
 const St = {
   sessions: {}, agentMeta: {}, events: [], people: {},
-  t0: 0, t1: 0, clock: 0, live: true, playing: true, si: 2, cursor: 0, since: 0,
+  t0: 0, t1: 0, clock: 0, live: true, playing: true, si: 2, scanFrom: 0, since: 0,
   cam: { x: 0, y: 0, z: .5, tx: 0, ty: 0, tz: .5 },
   focus: null, q: '', dpr: 1, userMoved: false, ff: false, wall: 0, health: null,
+  catchUp: true,   // draining a backlog (reload / scrub): place people, don't animate
 };
 
 /* ---------------------------------------------------------------- data --- */
@@ -79,9 +80,10 @@ async function poll() {
     if (!St.t0) { St.t0 = d.start; St.clock = d.now; }
     St.t1 = d.now;
     if (d.events.length) {
-      St.since = d.events[d.events.length - 1].t;
+      St.since = Math.max(St.since, d.events[d.events.length - 1].t);
       St.events.push(...d.events);
       St.events.sort((a, b) => a.t - b.t);
+      rewind();     // a late event may have landed behind where we have scanned
     }
     if (St.events.length) St.t0 = St.events[0].t - 60;
   } catch (e) { /* server gone: keep animating what we have */ }
@@ -146,7 +148,7 @@ function station(p, tool) {
 
 function goTo(p, tx, ty, act, face) {
   p.act = act; p.arriveFace = face; p.dest = { x: tx, y: ty };
-  if (St.ff) { p.x = tx + .5; p.y = ty + .5; p.path = null; arrive(p); return; }
+  if (St.ff || St.catchUp) { p.x = tx + .5; p.y = ty + .5; p.path = null; arrive(p); return; }
   if (Math.abs(p.x - (tx + .5)) < .1 && Math.abs(p.y - (ty + .5)) < .1) { arrive(p); return; }
   const pts = F.path(p.x, p.y, tx, ty);
   if (!pts || pts.length < 2) { p.x = tx + .5; p.y = ty + .5; arrive(p); return; }
@@ -175,6 +177,13 @@ function apply(e) {
   Chat.say(p, p.saying, e.kind === 'prompt', St.wall, e.t, !St.ff);
 }
 
+/* "applied" lives on the event, not on an index, because the array is re-sorted
+   on every poll — an index would silently skip an event inserted behind it. */
+function rewind() {
+  St.scanFrom = 0;
+  while (St.scanFrom < St.events.length && St.events[St.scanFrom].done) St.scanFrom++;
+}
+
 function rebuild(to) {
   for (const k in St.people) {
     const p = St.people[k];
@@ -183,8 +192,9 @@ function rebuild(to) {
   }
   St.people = {};
   Chat.clear();
-  St.cursor = 0;
-  while (St.cursor < St.events.length && St.events[St.cursor].t <= to - GONE) St.cursor++;
+  for (const e of St.events) e.done = e.t <= to - GONE;
+  rewind();
+  St.catchUp = true;      // the backlog about to replay must not be walked out
 }
 
 /* --------------------------------------------------------------- search --- */
@@ -620,9 +630,16 @@ function frame(now) {
   if (St.live) St.clock = Date.now() / 1000;
   else if (St.playing) St.clock = Math.min(St.clock + dt * rate, St.t1);
 
-  let budget = EVENT_BUDGET;
-  while (St.cursor < St.events.length && St.events[St.cursor].t <= St.clock && budget-- > 0)
-    apply(St.events[St.cursor++]);
+  let i = St.scanFrom, budget = EVENT_BUDGET, applied = 0;
+  while (i < St.events.length && St.events[i].t <= St.clock && budget > 0) {
+    const e = St.events[i++];
+    if (e.done) continue;
+    e.done = true; budget--; applied++;
+    apply(e);
+  }
+  while (St.scanFrom < St.events.length && St.events[St.scanFrom].done) St.scanFrom++;
+  // backlog drained once we are back to at most one event per frame: animate again
+  if (St.catchUp && applied <= 1) St.catchUp = false;
 
   step(St.ff ? dt : dt);
   render();

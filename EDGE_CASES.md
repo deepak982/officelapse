@@ -76,7 +76,7 @@ python3 test_reader.py && python3 test_labels.py && python3 test_tree.py
 | D6 | Activity occupying a tiny slice of the window | ✅ scrubber spans the *events*, not the empty window |
 | D7 | Replay at 1800× | ✅ fast-forward: walks and bubbles skipped, chat still recorded |
 | D8 | Event burst (139 in one minute) at high speed | ✅ per-frame event budget stops the loop stalling |
-| D9 | An older event arriving after the cursor passed it | ⚠️ known gap — a late out-of-order event is skipped, not replayed |
+| D9 | An older event arriving after the cursor passed it | ✅ "applied" is a flag on the event, not an index into an array that gets re-sorted every poll, so a late insert behind the scan position is still picked up (browser-verified, not headlessly pinned) |
 
 ## E. Floor and rendering
 
