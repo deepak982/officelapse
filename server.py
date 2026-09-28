@@ -10,7 +10,22 @@ Stdlib only.  Run:  python3 server.py   ->  http://localhost:8777
 import glob, http.server, json, os, re, socketserver, time, urllib.parse
 from datetime import datetime
 
-ROOT = os.path.expanduser("~/.claude/projects")
+def _find_root():
+    """Where this machine keeps its Claude Code session logs.
+
+    Claude Code honours CLAUDE_CONFIG_DIR to relocate ~/.claude, so hardcoding
+    the home path breaks on any machine that uses it.
+    """
+    override = os.environ.get("OFFICELAPSE_ROOT")
+    if override:
+        return os.path.expanduser(override)
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg:
+        return os.path.join(os.path.expanduser(cfg), "projects")
+    return os.path.expanduser("~/.claude/projects")
+
+
+ROOT = _find_root()
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("PORT", 8777))
 WINDOW = float(os.environ.get("HOURS", 24)) * 3600
@@ -201,4 +216,9 @@ if __name__ == "__main__":
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("127.0.0.1", PORT), H) as s:
         print(f"officelapse -> http://localhost:{PORT}  (last {WINDOW/3600:g}h)")
+        print(f"  reading {ROOT}")
+        if not os.path.isdir(ROOT):
+            print("  note: that directory does not exist yet — the floor stays empty"
+                  " until a Claude Code session writes there."
+                  " Set OFFICELAPSE_ROOT if your logs live elsewhere.")
         s.serve_forever()

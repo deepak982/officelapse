@@ -52,6 +52,23 @@ PORT=9000 HOURS=72 ./run.sh     # different port, wider time window
 `PORT` defaults to `8777`, `HOURS` to `24`. Logs go to `/tmp/officelapse.log`. Running it
 again kills the previous instance and rebinds, so it doubles as a restart.
 
+It finds your session logs on its own, in this order:
+
+1. `OFFICELAPSE_ROOT`, if you set it
+2. `$CLAUDE_CONFIG_DIR/projects`, if Claude Code's config dir has been relocated
+3. `~/.claude/projects`
+
+No configuration needed on a normal install — every project and session on the machine is
+discovered automatically, and new ones appear as new rooms while it runs (it re-reads every
+two seconds). A machine that has never run Claude Code simply shows an empty floor.
+
+**Platforms.** macOS and Linux. On Windows use WSL or Git Bash, or run `python3 server.py`
+directly and open the URL yourself — `run.sh` is only a convenience wrapper.
+
+**Claude Code versions.** The reader is built against the session-log layout of Claude Code
+2.1.x (`<sessionId>.jsonl` plus `<sessionId>/subagents/agent-<id>.jsonl`). Older versions that
+predate the `subagents/` directory will still render bosses, just without teammates.
+
 ---
 
 ## Controls
