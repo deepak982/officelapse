@@ -28,7 +28,7 @@ export const OPT = {
   offset: 0.018,
   jacketOffset: 0.030,   // a jacket hangs off the body, not on it
   collarRise: 0.030,     // the collar's vertical stand
-  seg: 8,                // sectors round the torso; 6 round a limb, 10 round a skirt
+  seg: 12,               // sectors round the torso; 12 round a limb, 14 round a skirt
   skirtHem: 0.62,        // just above the knee. Raise for a dress, drop for a long one
   skirtFlare: 1.55,      // hem radius / waist radius
   faceLift: 0.004,       // how far a face feature stands off the skull
@@ -131,12 +131,13 @@ function sampleBody(mesh) {
 /* One radius per sector, not a bounding ellipse. A hip or shoulder cross-section fills
    the corners of its own bounding box, so an ellipse inscribed in that box leaves the
    skin outside the garment on the diagonals — measured at up to 0.024 before this.
-   Each radius is then circumscribed by 1/cos(pi/seg), which is the exact amount the
-   flat chord between two ring vertices cuts inside them, so `pad` is pure cloth
-   thickness and not half a fudge factor.
    The centre matters too: the pelvis sits 0.05 behind the spine, so a ring centred on
-   z=0 would leave the backside outside the shirt. */
-function measure(body, mask, along, lo, hi, side, seg) {
+   z=0 would leave the backside outside the shirt.
+   Raw sector maxima and the count behind each one: the caller decides which sectors it
+   trusts and applies the circumscription, so one starved sector can be re-measured in a
+   wider slab without the well-fed ones losing their own reading. `ctr` pins the centre
+   to an earlier measurement's, which is what makes the two commensurable. */
+function measure(body, mask, along, lo, hi, side, seg, ctr) {
   const [cu, cv] = CROSS[along];
   const keep = i => (body.g[i] & mask) &&
     body.p[i * 3 + along] >= lo && body.p[i * 3 + along] <= hi &&
@@ -152,53 +153,74 @@ function measure(body, mask, along, lo, hi, side, seg) {
     n++;
   }
   if (!n) return null;
-  const mu = (u0 + u1) / 2, mv = (v0 + v1) / 2;
-  const step = Math.PI * 2 / seg, R = new Float64Array(seg).fill(-1);
+  const mu = ctr ? ctr[0] : (u0 + u1) / 2, mv = ctr ? ctr[1] : (v0 + v1) / 2;
+  const step = Math.PI * 2 / seg;
+  const R = new Float64Array(seg).fill(-1), C = new Uint16Array(seg);
   for (let i = 0; i < body.n; i++) {
     if (!keep(i)) continue;
     const du = body.p[i * 3 + cu] - mu, dv = body.p[i * 3 + cv] - mv;
     let k = Math.round(Math.atan2(dv, du) / step) % seg;
     if (k < 0) k += seg;
+    C[k]++;
     const r = Math.hypot(du, dv);
     if (r > R[k]) R[k] = r;
   }
-  const sec = 1 / Math.cos(step / 2), out = new Float64Array(seg);
-  for (let k = 0; k < seg; k++) {
-    // a sector nothing landed in borrows from its neighbours rather than collapsing
-    let r = R[k];
-    for (let d = 1; r < 0 && d <= seg; d++)
-      r = Math.max(R[(k + d) % seg], R[(k - d + seg * 2) % seg]);
-    out[k] = Math.max(r, 0) * sec;
-  }
-  return { u: mu, v: mv, R: out, n };
+  return { u: mu, v: mv, R, C, n };
 }
+
+/* Two samples is what a sector needs to be believed. The male mesh carries 852 vertices
+   for a whole leg, so a sector can catch exactly one — and if that one is an inner
+   surface it reports it as the outer radius, measured once as a 0.060 gash in the skirt
+   hem. Below this a sector is re-measured in a wider slab; at or above it, it keeps what
+   it saw. The old quota was the same 6-per-sector idea applied to the WHOLE ring, which
+   on a sparse body meant every sector inherited the widest thing in a slab that also
+   held a hip or a ribcage. */
+const SECTOR_MIN = 2;
 
 /* One ring per station, each measuring its own slab out to the half-way point toward
    its neighbours — so every body cross-section in the span is inside some ring and the
-   clearance only has to cover the chord, not a bulge nobody looked at. */
+   clearance only has to cover the chord, not a bulge nobody looked at.
+   Each radius is circumscribed by 1/cos(pi/seg), the exact amount the flat chord between
+   two ring vertices cuts inside them, so `pad` is pure cloth thickness and not half a
+   fudge factor. */
 function ringsAlong(body, mask, along, stations, pad, seg, side, fat) {
   const rings = [];
   const spanLo = Math.min(...stations) - 0.01, spanHi = Math.max(...stations) + 0.01;
+  const sec = 1 / Math.cos(Math.PI / seg);
   stations.forEach((at, i) => {
     const up = stations[i + 1] === undefined ? at : (at + stations[i + 1]) / 2;
     const dn = stations[i - 1] === undefined ? at : (at + stations[i - 1]) / 2;
-    let lo = Math.min(at, dn, up) - 1e-4, hi = Math.max(at, dn, up) + 1e-4, m = null;
-    /* The male mesh carries 852 vertices for a whole leg, so a thin slab can leave most
-       sectors empty and the one sector that did catch something reporting an inner
-       surface as the outer radius — measured as a 0.06 gash in the skirt hem. A short
-       slab widens until it has a quota, but only inside the garment's own span: growing
-       the ankle ring downward would size a trouser hem off the foot. */
-    for (let g = 0; g < 14; g++) {
-      m = measure(body, mask, along, lo, hi, side, seg);
-      if (m && m.n >= seg * 6) break;
-      if (lo <= spanLo && hi >= spanHi) break;
+    let lo = Math.min(at, dn, up) - 1e-4, hi = Math.max(at, dn, up) + 1e-4;
+    let m = measure(body, mask, along, lo, hi, side, seg);
+    // nothing at all in the station's slab: there is no centre to hang sectors off yet
+    while (!m && (lo > spanLo || hi < spanHi)) {
       lo = Math.max(spanLo, lo - 0.02);
       hi = Math.min(spanHi, hi + 0.02);
+      m = measure(body, mask, along, lo, hi, side, seg);
     }
     if (!m) m = measure(body, mask, along, spanLo - 0.06, spanHi + 0.06, side, seg);
     if (!m) return;
+    /* Growth is per sector and stays inside the garment's own span: reaching below the
+       ankle ring would size a trouser hem off the foot. */
+    const starved = () => m.C.some(c => c < SECTOR_MIN);
+    for (let g = 0; g < 40 && starved() && (lo > spanLo || hi < spanHi); g++) {
+      lo = Math.max(spanLo, lo - 0.02);
+      hi = Math.min(spanHi, hi + 0.02);
+      const w = measure(body, mask, along, lo, hi, side, seg, [m.u, m.v]);
+      if (!w) continue;
+      for (let k = 0; k < seg; k++)
+        if (m.C[k] < SECTOR_MIN) { m.R[k] = w.R[k]; m.C[k] = w.C[k]; }
+    }
     const k = fat ? fat(i, stations.length) : 1;
-    rings.push(ring(along, at, m.u, m.v, m.R.map(r => (r + pad) * k)));
+    const R = new Float64Array(seg);
+    for (let s = 0; s < seg; s++) {
+      // a sector still empty at the widest slab borrows rather than collapsing
+      let r = m.R[s];
+      for (let d = 1; r < 0 && d <= seg; d++)
+        r = Math.max(m.R[(s + d) % seg], m.R[(s - d + seg * 2) % seg]);
+      R[s] = (Math.max(r, 0) * sec + pad) * k;
+    }
+    rings.push(ring(along, at, m.u, m.v, R));
   });
   return rings;
 }
@@ -294,7 +316,7 @@ function sleeves(B, f, o, endX) {
     const stations = [side * f.shoulderX * 0.78, side * endX];
     if (Math.abs(endX) > Math.abs(f.elbowX)) stations.splice(1, 0, side * f.elbowX);
     // first ring inflated so the sleeve reads as a shoulder, last one as a cuff
-    part(B, G_ARM | G_TORSO, ringsAlong(B.body, G_ARM, 0, stations, o.pad, 6, side,
+    part(B, G_ARM | G_TORSO, ringsAlong(B.body, G_ARM, 0, stations, o.pad, 12, side,
       (i, n) => (i === 0 ? 1.35 : i === n - 1 ? 1.16 : 1)));
   }
 }
@@ -356,7 +378,7 @@ function trousers(B, f, o) {
   for (const side of [1, -1]) {
     // four stations: the calf is the widest part of a leg and sits between knee and ankle
     const stations = [f.hipY - 0.05, f.kneeY, (f.kneeY + f.ankleY) / 2, f.ankleY + 0.03];
-    part(B, G_LEG, ringsAlong(body, G_LEG, 1, stations, pad, 6, side,
+    part(B, G_LEG, ringsAlong(body, G_LEG, 1, stations, pad, 12, side,
       (i, n) => (i === n - 1 ? 1.12 : 1)));
   }
 }
@@ -369,7 +391,7 @@ function trousers(B, f, o) {
    Fine at a few dozen pixels; needs cloth or a couple of skirt bones to do better. */
 function skirt(B, f, o) {
   const body = B.body, waistY = f.pelvisY + 0.04, hemY = Math.min(o.skirtHem, waistY - 0.1);
-  const seg = Math.max(o.seg, 10);
+  const seg = Math.max(o.seg, 14);
   const stations = [waistY, waistY - (waistY - hemY) / 3, waistY - (waistY - hemY) * 2 / 3, hemY];
   const flare = (i, n) => 1 + (o.skirtFlare - 1) * (i / (n - 1));
   const rings = ringsAlong(body, G_TORSO | G_LEG, 1, stations, o.pad, seg, 0, flare);
