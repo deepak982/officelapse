@@ -16,12 +16,12 @@ const { St, SPEEDS, IDLE, FF_ABOVE } = Sim;
 const { roomHit, roomName, personName, personText, shortLabel, clean, deptHue } = Sim;
 
 /* the sim speaks through these; wiring them is the view's job.
-   The last argument is "show a bubble": false under the 3D view for the same reason
-   it is false above 10x replay — the bubble layer is 2D DOM over the 2D camera, and
-   chat.js logs the line either way. When the 3D view grows its own bubbles it drives
-   Chat.sync with its own projector and this drops the `&& !is3D`. */
+   The last argument is "show a bubble": suppressed above 10x replay, where nobody
+   could read one anyway, and chat.js logs the line regardless. Bubbles are DOM over
+   the canvas and belong to whichever view is up — the 3D loop drives Chat.sync with
+   a projector built from its own camera, exactly as this one does below. */
 Sim.hooks.say = (p, text, isTask, simNow) =>
-  Chat.say(p, text, isTask, St.wall, simNow, !St.ff && !is3D);
+  Chat.say(p, text, isTask, St.wall, simNow, !St.ff);
 Sim.hooks.reset = () => Chat.clear();
 
 const cv = document.getElementById('cv'), cx = cv.getContext('2d');

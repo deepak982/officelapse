@@ -35,7 +35,6 @@
      Bubbles are positioned by the 2D camera, so they stay down in 3D. */
   #cv3{position:absolute;inset:0;display:none;z-index:1}
   #stage.three #cv3{display:block}
-  #stage.three #bubbles{display:none}
   /* visibility, not display: office.js still measures a real element, so the
      fallback is a live canvas the instant the class comes off. An uninitialised
      #cv3 is transparent, so during the three.js download you see the page
@@ -213,13 +212,41 @@
       console.error('view3d: characters unavailable, floor only —', e);
     }
 
-    stage.classList.add('three');
+    /* Speech bubbles are DOM over the canvas and belong to whichever view is up.
+       chat.js takes the projector as an argument for exactly this reason, so the
+       3D view supplies one built from its own camera and nothing in chat.js
+       changes. Aimed at 1.95 units — just over head height — so a bubble sits
+       above its speaker rather than over their feet. */
+    const THREE = await import('./vendor/three.module.js');
+    const V = new THREE.Vector3();
+    const project = (x, y) => {
+      const cam = View3D.getCamera(), r = canvas.getBoundingClientRect();
+      V.set(x, 1.95, y).project(cam);
+      const sx = (V.x * .5 + .5) * r.width, sy = (-V.y * .5 + .5) * r.height;
+      return { x: sx, y: sy,
+               off: V.z > 1 || sx < -160 || sx > r.width + 160 || sy < -80 || sy > r.height + 80 };
+    };
+    /* how many pixels is one tile right now? Below ~18 the speaker cannot be told
+       apart from their neighbours, which is when the 2D view hides bubbles too. */
+    const tilePx = () => {
+      const a = project(0, 0), b = project(1, 0);
+      return Math.hypot(b.x - a.x, b.y - a.y);
+    };
+    const speaking = p => {
+      const St = window.Sim.St, inBand = !!(p.fac || p.cowork);
+      if (St.focus && St.focus !== p.room && !inBand) return false;
+      if (window.Sim.roomHit && !window.Sim.roomHit(p.room) && !inBand) return false;
+      return !St.ff;
+    };
+
     prev = performance.now();
     const loop = now => {
       const dt = Math.min((now - prev) / 1000, .1); prev = now;
+      const St = window.Sim.St;
       View3D.sync(window.Sim, window.Floor);
-      if (chars) chars.sync(window.Sim.St.people, dt);
+      if (chars) chars.sync(St.people, dt);
       View3D.render(dt);
+      window.Chat.sync(St.people, project, St.wall, speaking, tilePx() > 18);
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
