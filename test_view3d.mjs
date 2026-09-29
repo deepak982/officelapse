@@ -6,7 +6,8 @@
    or only needs three.js's CPU side, and that is where the bugs are — geometry per
    prop type and footprint, which wall a picture hangs on, which way a chair faces,
    the camera basis, the reconciliation of scene against world, the LOD rule, the walk
-   rate against the clip's baked stride, and the variety 135 people are built from.
+   rate against the clip's baked stride, the variety 135 people are built from, and
+   whether the clothes, hair and second body hold up on a skeleton they were not cut for.
 
    Four things are pulled out of their modules rather than reimplemented:
      - scene.js's build/sync helpers are sliced out of the shipped source and run
@@ -26,16 +27,19 @@
 
 import assert from 'node:assert';
 import vm from 'node:vm';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
 import * as THREE from './vendor/three.module.js';
 import { GLTFLoader } from './vendor/GLTFLoader.js';
+import { clone as skeletonClone } from './vendor/SkeletonUtils.js';
 import * as Props from './view3d/props.js';
+import * as Garments from './view3d/garments.js';
+import { mergeGeometries } from './vendor/BufferGeometryUtils.js';
 import { MAT, COL, deptColor, amColor, plateMaterial, personPalette, DIM, NEUTRAL }
   from './view3d/materials.js';
-import { createCharacters, chooseFull, buildOf, walkScale, CLIP_FOR, GESTURE_KEYS }
-  from './view3d/characters.js';
+import { createCharacters, chooseFull, buildOf, walkScale, CLIP_FOR, GESTURE_KEYS,
+  selfTest as charSelfTest } from './view3d/characters.js';
 
 /* A second, independent props.js: it shouts once per unknown type per module
    instance, so probing the same type twice through one instance is silent. */
@@ -969,32 +973,78 @@ await vcheck('V15', 'every piece of clutter rests on furniture that is really th
 /* The real rig, parsed from the .glb without a browser. characters.js's own
    selfTest() covers the pure helpers; nothing here repeats it. */
 const CHARS_SRC = readFileSync(new URL('./view3d/characters.js', import.meta.url), 'utf8');
-const RIG = await (async () => {
-  try {
-    const loader = new GLTFLoader();
-    const parse = f => new Promise((res, rej) => {
-      const b = readFileSync(new URL('./assets/' + f.replace(/^assets\//, ''), import.meta.url));
-      loader.parse(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength), '', res, rej);
-    });
-    const man = JSON.parse(readFileSync(new URL('./assets/manifest.json', import.meta.url), 'utf8'));
-    const rig = await parse(man.rig.file);
-    /* the clip -> extraClips wiring is read out of characters.js rather than written
-       here: load()'s browser path picks the variant sources itself, and a list copied
-       into this fixture would keep loading walk2 from the old file while the real
-       layer asked for a new one — the fixture would pass and the app would be one
-       clip short. The regex mirrors `wanted.<key> = man.extraClips.<name>`. */
-    const want = { ...man.clips, ...man.gestures };
-    for (const m of CHARS_SRC.matchAll(/wanted\.(\w+)\s*=\s*man\.extraClips\.(\w+)/g))
-      want[m[1]] = (man.extraClips || {})[m[2]];
-    const clips = {};
-    for (const [k, spec] of Object.entries(want)) {
-      if (!spec || !spec.file) continue;
-      const g = await parse(spec.file);
-      if (g.animations[0]) clips[k] = g.animations[0];
-    }
-    return { scene: rig.scene, clips };
-  } catch (e) { return { error: e.message }; }
+/* One GLB parser and one manifest for every asset check below. MANIFEST is the
+   authority for every measured number — nothing here writes one down. */
+const GLB = (() => {
+  const loader = new GLTFLoader();
+  return f => new Promise((res, rej) => {
+    const b = readFileSync(new URL('./assets/' + f.replace(/^assets\//, ''), import.meta.url));
+    loader.parse(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength), '', res, rej);
+  });
 })();
+const MANIFEST = JSON.parse(
+  readFileSync(new URL('./assets/manifest.json', import.meta.url), 'utf8'));
+/* every rig key the manifest carries, so a third body is picked up without editing */
+const RIG_KEYS = Object.keys(MANIFEST).filter(k => /^rig/.test(k) && MANIFEST[k].file);
+
+/* Both bodies, each with its own parse of the clip pool. The clip -> extraClips wiring
+   is read out of characters.js, not written here: a list copied into this fixture would
+   keep loading walk2 from the old file while the real layer asked for a new one. */
+const RIGS = await (async () => {
+  const out = {};
+  for (const key of RIG_KEYS) {
+    try {
+      const rig = await GLB(MANIFEST[key].file);
+      const want = { ...MANIFEST.clips, ...MANIFEST.gestures };
+      for (const m of CHARS_SRC.matchAll(/wanted\.(\w+)\s*=\s*man\.extraClips\.(\w+)/g))
+        want[m[1]] = (MANIFEST.extraClips || {})[m[2]];
+      const clips = {};
+      for (const [k, spec] of Object.entries(want)) {
+        if (!spec || !spec.file) continue;
+        const g = await GLB(spec.file);
+        if (g.animations[0]) clips[k] = g.animations[0];
+      }
+      out[key] = { scene: rig.scene, clips };
+    } catch (e) { out[key] = { error: e.message }; }
+  }
+  return out;
+})();
+const RIG = RIGS.rig || { error: 'the manifest no longer carries a `rig`' };
+
+const HAIR = MANIFEST.hair;
+const hairGroupOf = (style) =>
+  Object.keys(HAIR.fit).find(g => (HAIR.fit[g].appliesTo || []).includes(style));
+/* facial hair is worn OVER a style, so it is not asked to cover a crown */
+const isOverlay = (style) => /wears over/.test(HAIR.styles[style].reads || '');
+
+const HAIR_GEO = await (async () => {
+  const out = {};
+  for (const [style, spec] of Object.entries(HAIR.styles)) {
+    try {
+      const g = await GLB(spec.file);
+      const meshes = [];
+      g.scene.traverse(o => { if (o.isMesh) meshes.push(o); });
+      out[style] = { meshes, spec };
+    } catch (e) { out[style] = { error: e.message }; }
+  }
+  return out;
+})();
+
+/* Everything load() needs to reach the code the browser reaches: the second body, the
+   hair geometries with the manifest's fit table, and Rhea's module. Without these the
+   layer deals one rig and nobody is dressed, so a fixture that omits them would test
+   the fallback and call it the feature. */
+const PRE = RIG.error ? null : {
+  scene: RIG.scene, clips: RIG.clips,
+  female: RIGS.rigFemale && !RIGS.rigFemale.error ? RIGS.rigFemale.scene : null,
+  hair: { fit: MANIFEST.hair.fit, styles: {} },
+  garments: Garments, merge: mergeGeometries,
+};
+if (PRE) for (const [style, h] of Object.entries(HAIR_GEO))
+  if (!h.error) PRE.hair.styles[style] = h.meshes[0].geometry;
+const dressed = () => ({ ...PRE, clips: { ...PRE.clips },
+                         hair: { fit: PRE.hair.fit, styles: { ...PRE.hair.styles } } });
+
 
 const person = (key, o = {}) => Object.assign({
   key, sid: 's1', aid: key, boss: false, x: 5, y: 5, face: Floor.N, state: 'type',
@@ -1143,6 +1193,15 @@ await check('K8', 'a frame that lands after dispose() is ignored, not a crash', 
   c.dispose();                                     // twice is allowed too
 });
 
+/* characters.js ships a selfTest over its pure helpers and nothing ran it, so it
+   guarded nothing. One line here, and it fails the suite instead of a comment. */
+await check('K9', "characters.js's own selfTest passes", () => {
+  const log = console.log;
+  console.log = () => {};
+  try { assert.strictEqual(charSelfTest(), true, 'selfTest did not return true'); }
+  finally { console.log = log; }
+});
+
 /* =============================================== M. the walk, end to end === */
 /* The office read as a robot because sim.js walked at 2.00-2.39 tiles/s against a clip
    whose baked stride covers 0.975 u/s — 2.05-2.45x playback. Three numbers in three
@@ -1151,8 +1210,6 @@ await check('K8', 'a frame that lands after dispose() is ignored, not a crash', 
    manifest, walkRef from live options, ground speed from a real sim, walkScale itself.
    The only thing written here is the band a human stride can occupy. */
 
-const MANIFEST = JSON.parse(
-  readFileSync(new URL('./assets/manifest.json', import.meta.url), 'utf8'));
 
 /* freshSim gives every event an agent id, so it never opens a boss (sim.js: `!e.aid`).
    Appended after the fact, so every other fixture keeps the roster it expects. */
@@ -1273,10 +1330,36 @@ function bodyRows(chars) {
   return out;
 }
 
+/* The full-rig side: everything a per-person choice can change. Whichever body was
+   picked shows in the mesh names, hair and garments show as children of Head or as
+   extra meshes, and the palette shows in the material colours — so this fingerprints
+   a choice that has not been written yet without naming it. */
+function rigRows(chars) {
+  const out = [];
+  for (const child of chars.group.children) {
+    if (child.isInstancedMesh) continue;
+    const parts = [];
+    child.traverse(o => {
+      if (o.isSkinnedMesh || o.isMesh)
+        parts.push(o.name + ':' + (o.geometry ? o.geometry.attributes.position.count : 0) +
+          '[' + [].concat(o.material)
+          .map(m => (m && m.color ? m.color.getHexString() : '-')).join('+') + ']');
+      else if (o.isBone && o.children.some(k => k.isMesh))
+        parts.push(o.name + '<' + o.children.filter(k => k.isMesh).map(k => k.name).join(',') + '>');
+    });
+    out.push(child.scale.toArray().map(v => v.toFixed(5)).join(',') + ' ' + parts.sort().join(' '));
+  }
+  return out.sort();
+}
+
 await check('D1', 'nothing in the 3D layer or the sim reaches for Math.random', () => {
   // behaviour cannot prove it: a Math.random() on a branch no fixture takes passes D3
-  const files = ['sim.js', 'floor.js', 'view3d/characters.js', 'view3d/materials.js',
-                 'view3d/props.js', 'view3d/scene.js'];
+  /* read the directory rather than listing modules: a new file in view3d/ is swept the
+     day it lands, which is when a stray Math.random() would go in unnoticed */
+  const files = ['sim.js', 'floor.js',
+    ...readdirSync(new URL('./view3d/', import.meta.url)).filter(f => f.endsWith('.js'))
+      .sort().map(f => 'view3d/' + f)];
+  assert(files.length >= 6, 'view3d/ lost modules: ' + files.join(' '));
   const hits = [];
   for (const f of files) {
     /* Comments are blanked, not stripped, so line numbers stay true. Every one of these
@@ -1302,6 +1385,7 @@ await check('D1', 'nothing in the 3D layer or the sim reaches for Math.random', 
   assert.deepStrictEqual(hits, [],
     'a replay cannot survive these: ' + hits.join(' ') +
     ' — every per-person choice must be a bit slice of p.h');
+  console.log('        %d modules swept: %s', files.length, files.join(' '));
 });
 
 await check('D2', '135 people are 135 different people, not 95 identical capsules', () => {
@@ -1350,65 +1434,79 @@ await check('D2', '135 people are 135 different people, not 95 identical capsule
   } finally { c.dispose(); }
 });
 
-await check('D3', 'the same clock replays the same people, down to the instance buffer', () => {
+await check('D3', 'the same clock replays the same people, rigs and stand-ins alike', async () => {
   /* Z5 pins that the sim replays the same POSITIONS; this pins that the layer then
-     dresses them identically. A new layer each time, so no cache carries over. */
-  const replay = (T) => {
+     dresses them identically. Both LODs, because a body, a hairstyle or a garment is
+     only visible on the rig — a new layer each time, so no cache carries over. */
+  const replay = async (T) => {
     Sim.rebuild(T);
     St.clock = T;
     for (let i = 0; i < 8; i++) Sim.advance(1 / 60);
     const c = createCharacters();
     try {
+      if (PRE) await c.load(dressed());   // body, hair and clothes, or it tests the fallback
       const ppl = Object.values(St.people).sort((a, b) => (a.key < b.key ? -1 : 1));
-      c.sync(ppl, 1 / 60);
-      return { n: ppl.length, rows: [...bodyRows(c)].map(([g, r]) => g + ':' + r.join('|')).join('\n') };
+      const focus = Floor.state.rooms[ppl[0] && ppl[0].sid] || null;
+      const got = c.sync(ppl, 1 / 60, { focus, clock: T });
+      return { n: ppl.length, full: got.full,
+               cheap: [...bodyRows(c)].map(([g, r]) => g + ':' + r.join('|')).join('\n'),
+               rigs: rigRows(c).join('\n') };
     } finally { c.dispose(); }
   };
   freshSim(135, 100);
-  const a = replay(200), b = replay(200);
+  const a = await replay(200), b = await replay(200);
   assert(a.n > 20, `the replay put only ${a.n} people back`);
+  assert(a.full > 0, 'nobody was rigged, so only the stand-ins were compared');
   assert.strictEqual(b.n, a.n, 'two replays of the same clock produced different rosters');
-  assert.strictEqual(a.rows, b.rows,
-    'two replays of the same clock dressed the same people differently — something ' +
-    'in the variety is not a pure function of p.h');
-  // and the comparison discriminates: a different roster must not compare equal
+  assert.strictEqual(b.full, a.full, 'the LOD split moved between two identical replays');
+  assert.strictEqual(a.cheap, b.cheap,
+    'two replays dressed the same stand-ins differently — something in the variety is ' +
+    'not a pure function of p.h');
+  assert.strictEqual(a.rigs, b.rigs,
+    'two replays built the same people different rigs — the body, hair, garment or ' +
+    'palette choice is not a pure function of p.h');
+  // and both comparisons discriminate: a different roster must not compare equal
   freshSim(40, 100);
-  const few = replay(200);
-  assert.notStrictEqual(few.rows, a.rows,
-    'a 40-person floor produced the same rows as a 135-person one — this check ' +
-    'compares nothing and would pass whatever the variety did');
-  console.log('        %d people, identical across two replays to clock 200', a.n);
+  const few = await replay(200);
+  assert.notStrictEqual(few.cheap, a.cheap, 'the stand-in fingerprint compares nothing');
+  assert.notStrictEqual(few.rigs, a.rigs, 'the rig fingerprint compares nothing');
+  console.log('        %d people (%d rigged), identical across two replays to clock 200',
+    a.n, a.full);
 });
 
-await check('D4', 'every clip variant a person can be dealt actually exists', async () => {
-  /* setClip falls back to the default when the rig lacks a variant, so a missing one
-     is silent — the office just goes back to one pose. Variants come from buildOf
-     itself, not a list here, so a third walk is covered the day it lands. */
-  assert(!RIG.error, 'the rig could not be parsed: ' + RIG.error);
-  const c = createCharacters();
-  try {
-    await c.load(RIG);
-    assert.strictEqual(c.info.mode, 'rig', 'the rig did not take: ' + c.info.notes.join('; '));
-    const dealt = { walk: new Set(), idle: new Set() };
-    for (let i = 0; i < 2000; i++) {
-      const v = buildOf(Math.imul(i + 1, 2246822519) >>> 0, false, c.options).variant;
-      for (const k in dealt) dealt[k].add(v[k]);
-    }
-    const bossV = buildOf(12345, true, c.options).variant;
-    for (const k in dealt) dealt[k].add(bossV[k]);
-    const missing = [];
-    for (const [key, set] of Object.entries(dealt))
-      for (const v of set) if (!c.info.clips[key + v]) missing.push(key + v);
-    assert.deepStrictEqual(missing, [],
-      'buildOf deals these and the rig carries no clip for them: ' + missing.join(' ') +
-      ' — everyone dealt one silently falls back to the default pose');
-    assert(dealt.walk.size >= 2 && dealt.idle.size >= 3,
-      `only ${dealt.walk.size} walks and ${dealt.idle.size} standing idles are ever ` +
-      'dealt — a corridor is one pose and a lounge is a rack of statues');
-    console.log('        walks %s, idles %s, all resolved on the real rig',
-      [...dealt.walk].map(v => 'walk' + v).join('/'),
-      [...dealt.idle].map(v => 'idle' + v).join('/'));
-  } finally { c.dispose(); }
+await check('D4', 'every clip variant a person can be dealt exists on every body', async () => {
+  /* setClip falls back to the default when a rig lacks a variant, so a missing one is
+     silent — the office just goes back to one pose. Variants come from buildOf itself,
+     not a list here, so a third walk is covered the day it lands; and it runs over
+     every body, because a variant that resolves on one rig and not the other dresses
+     half the floor in statues. */
+  for (const key of RIG_KEYS) {
+    assert(!RIGS[key].error, `${key} could not be parsed: ${RIGS[key].error}`);
+    const c = createCharacters();
+    try {
+      await c.load({ scene: RIGS[key].scene, clips: { ...RIGS[key].clips } });
+      assert.strictEqual(c.info.mode, 'rig', `${key} did not take: ${c.info.notes.join('; ')}`);
+      const dealt = { walk: new Set(), idle: new Set() };
+      for (let i = 0; i < 2000; i++) {
+        const v = buildOf(Math.imul(i + 1, 2246822519) >>> 0, false, c.options).variant;
+        for (const k in dealt) dealt[k].add(v[k]);
+      }
+      const bossV = buildOf(12345, true, c.options).variant;
+      for (const k in dealt) dealt[k].add(bossV[k]);
+      const missing = [];
+      for (const [k, set] of Object.entries(dealt))
+        for (const v of set) if (!c.info.clips[k + v]) missing.push(k + v);
+      assert.deepStrictEqual(missing, [],
+        `buildOf deals these and ${key} carries no clip for them: ${missing.join(' ')} — ` +
+        'everyone dealt one silently falls back to the default pose');
+      assert(dealt.walk.size >= 2 && dealt.idle.size >= 3,
+        `only ${dealt.walk.size} walks and ${dealt.idle.size} standing idles are ever ` +
+        'dealt — a corridor is one pose and a lounge is a rack of statues');
+      console.log('        %s: walks %s, idles %s, all resolved', key,
+        [...dealt.walk].map(v => 'walk' + v).join('/'),
+        [...dealt.idle].map(v => 'idle' + v).join('/'));
+    } finally { c.dispose(); }
+  }
 });
 
 /* ============================================================= B. the boss === */
@@ -1478,6 +1576,440 @@ await check('B2', 'the boss wears his own colour, outside every teammate shirt',
     Math.round(boss.h * 360), Math.round(boss.s * 100), Math.round(boss.l * 100),
     Math.round(Math.min(...mates.map(m => m.l)) * 100),
     Math.round(Math.max(...mates.map(m => m.l)) * 100));
+});
+
+/* ========================================================= R. two bodies === */
+/* Everything derived from MANIFEST.rig* so a third body needs no edit here. The trap
+   these guard: both rigs ship TWO primitives, and the names differ — `Mannequin_1` is
+   the main mesh on one rig and the joints on the other, so name-matching half-works. */
+
+const rigParts = (scene) => {
+  const meshes = [];
+  scene.traverse(o => { if (o.isSkinnedMesh) meshes.push(o); });
+  return meshes;
+};
+
+await check('R1', 'every body is found by isSkinnedMesh, never by mesh name', () => {
+  assert(RIG_KEYS.length >= 2, 'the manifest carries only one body: ' + RIG_KEYS.join(' '));
+  const byRig = {};
+  for (const key of RIG_KEYS) {
+    assert(!RIGS[key].error, `${key} would not parse: ${RIGS[key].error}`);
+    const meshes = rigParts(RIGS[key].scene);
+    const spec = MANIFEST[key];
+    assert.deepStrictEqual(meshes.map(m => m.name).sort(), [...spec.skinnedMeshNames].sort(),
+      `${key} really contains ${meshes.map(m => m.name)} — the manifest says ` +
+      `${spec.skinnedMeshNames}`);
+    assert.strictEqual(meshes.length, spec.skinnedMeshNames.length);
+    assert(meshes.length > 1, `${key} has one primitive — the note says there are two, ` +
+      'and code that takes the first mesh would drop the other');
+    assert(meshes.every(m => m.skeleton && m.skeleton.bones.length === spec.boneCount),
+      `${key} skeleton is not the manifest's ${spec.boneCount} bones`);
+    byRig[key] = meshes.map(m => m.name).join(',');
+  }
+  const lists = Object.values(byRig);
+  assert.strictEqual(new Set(lists).size, lists.length,
+    'two bodies now share a mesh-name list, so this check no longer proves that ' +
+    'matching by name is unsafe — keep it honest or drop it');
+  const seen = new Map();
+  for (const key of RIG_KEYS)
+    for (const n of byRig[key].split(',')) seen.set(n, (seen.get(n) || 0) + 1);
+  const collide = [...seen].filter(([, n]) => n > 1).map(([n]) => n);
+  console.log('        %s%s', RIG_KEYS.map(k => `${k}: ${byRig[k]}`).join(' | '),
+    collide.length ? ` (${collide.join(' ')} names a different primitive on each)` : '');
+});
+
+await check('R2', 'every clip track binds on every body, with nothing left unbound', async () => {
+  /* The female lacks 6 of the male's bones. If any of them carried a track, that clip
+     would silently do nothing on her — so the two facts are checked together. */
+  const specs = { ...MANIFEST.clips, ...MANIFEST.gestures, ...MANIFEST.extraClips };
+  const targets = new Set();
+  let nClips = 0, nTracks = 0;
+  for (const spec of Object.values(specs)) {
+    if (!spec || !spec.file) continue;
+    const clip = (await GLB(spec.file)).animations[0];
+    assert(clip, `${spec.file} carries no AnimationClip`);
+    nClips++; nTracks += clip.tracks.length;
+    for (const t of clip.tracks) targets.add(t.name.split('.')[0]);
+  }
+  assert(nClips >= 18, `only ${nClips} clip files — the manifest has lost some`);
+  const bones = {};
+  for (const key of RIG_KEYS) {
+    bones[key] = new Set(rigParts(RIGS[key].scene)[0].skeleton.bones.map(b => b.name));
+    const unbound = [...targets].filter(t => !bones[key].has(t));
+    assert.deepStrictEqual(unbound, [],
+      `${key} has no bone for these animated tracks: ${unbound.join(' ')} — every clip ` +
+      'targeting one would silently do nothing on that body');
+  }
+  // and the bones one body lacks are exactly the ones the manifest says go unanimated
+  const male = bones.rig, female = bones.rigFemale;
+  if (male && female) {
+    assert.deepStrictEqual([...male].filter(b => !female.has(b)).sort(),
+      [...MANIFEST.clipLoading.unanimatedBones].sort(),
+      'the bones rigFemale lacks are no longer exactly clipLoading.unanimatedBones — ' +
+      'one of them may now carry a track');
+    assert.deepStrictEqual([...female].filter(b => !male.has(b)), [],
+      'rigFemale has bones the male rig lacks, so a clip authored on her would not bind');
+  }
+  console.log('        %d clips, %d tracks over %d bones, bound on %s',
+    nClips, nTracks, targets.size, RIG_KEYS.join(' + '));
+});
+
+await check('R3', 'characters.js rigs every body, one skeleton per person', async () => {
+  /* load(pre) takes any parsed scene, so this runs before the roster picks between
+     them — the point is that the layer can already drive her. */
+  const print = {};
+  for (const key of RIG_KEYS) {
+    const c = createCharacters();
+    try {
+      const info = await c.load({ scene: RIGS[key].scene, clips: { ...RIGS[key].clips } });
+      assert.strictEqual(info.mode, 'rig', `${key} fell back to stand-ins: ${info.notes.join('; ')}`);
+      assert.deepStrictEqual(info.missing, [], `${key} has no clip for: ${info.missing}`);
+      assert(info.notes.some(n => /split \d+ mesh/.test(n)),
+        `${key}: splitRegions partitioned nothing, so everyone on that body wears one ` +
+        'tone — it reads the bone that skins each vertex, and her bones differ');
+      const R = { sid: 's1' };
+      const ppl = Array.from({ length: 6 }, (_, i) =>
+        person('p' + i, { x: i, y: 2, h: 1000 + i * 7919, room: R,
+                          state: i % 2 ? 'walk' : 'type' }));
+      const got = c.sync(ppl, 1 / 60, { focus: R, clock: 0 });
+      assert.strictEqual(got.full, 6, `${key} rigged ${got.full} of 6`);
+      const skels = new Set();
+      let meshes = 0;
+      c.group.traverse(o => { if (o.isSkinnedMesh) { skels.add(o.skeleton); meshes++; } });
+      assert(meshes >= 6 * MANIFEST[key].skinnedMeshNames.length,
+        `${key}: ${meshes} skinned meshes for 6 people with ` +
+        `${MANIFEST[key].skinnedMeshNames.length} primitives each — a primitive was dropped`);
+      assert.strictEqual(skels.size, meshes,
+        `${key}: ${meshes} meshes share ${skels.size} skeletons — mesh.clone, not ` +
+        'SkeletonUtils.clone, and everyone animates in lockstep');
+      for (let i = 0; i < 20; i++) c.sync(ppl, 1 / 60, { focus: R, clock: i / 60 });
+      assert.strictEqual(c.info.full, 6, `${key} lost rigs over 20 frames`);
+      print[key] = rigRows(c).join('\n');
+      console.log('        %s: %d rigs, %d meshes, %d skeletons', key, got.full, meshes, skels.size);
+    } finally { c.dispose(); }
+  }
+  /* D3's rig fingerprint is what will catch a non-deterministic body pick once the
+     roster chooses between them. It only can if it tells the bodies apart — so that is
+     asserted here, while both are in hand, rather than assumed later. */
+  const prints = Object.values(print);
+  assert.strictEqual(new Set(prints).size, prints.length,
+    'the same roster fingerprints identically on every body, so D3 cannot see which ' +
+    'body a person was given — widen rigRows before trusting it');
+});
+
+await check('R4', 'the roster deals both bodies, hair and clothes to real people', async () => {
+  /* Everything above proves each piece works. This proves the floor USES them: a body
+     choice that always came out male, or an outfit nobody was dealt, would leave every
+     other check in this file passing over a floor of undressed men. */
+  assert(PRE, 'the rig fixture did not load: ' + RIG.error);
+  assert(PRE.female, 'the female body did not parse, so the roster has one body to deal');
+  const c = createCharacters();
+  try {
+    shouts = [];
+    await c.load(dressed());
+    assert.strictEqual(c.info.mode, 'rig', 'the rig did not take: ' + c.info.notes.join('; '));
+    assert(c.info.rigFemale, 'load() ignored the second body');
+    freshSim(135, 100);
+    const ppl = Object.values(St.people).sort((a, b) => (a.key < b.key ? -1 : 1));
+    const focus = Floor.state.rooms[ppl[0].sid];
+    const got = c.sync(ppl, 1 / 60, { focus, clock: 100 });
+    assert(got.full > 10, `only ${got.full} rigs, too few to see a spread of bodies`);
+
+    /* Which body somebody got is observable as the mesh names: the two rigs name their
+       primitives differently, which is the same fact R1 pins. */
+    const bodies = new Map();
+    let dressedCount = 0, haired = 0;
+    for (const child of c.group.children) {
+      if (child.isInstancedMesh) continue;
+      const names = [];
+      let hair = 0, cloth = 0;
+      child.traverse(o => {
+        if (o.isSkinnedMesh) { names.push(o.name); if (!o.userData.body) cloth++; }
+        else if (o.isMesh) hair++;
+      });
+      const key = names.sort().join(',');
+      bodies.set(key, (bodies.get(key) || 0) + 1);
+      if (cloth) dressedCount++;
+      if (hair) haired++;
+    }
+    assert(bodies.size >= 2,
+      'every rigged person is on the same body: ' + [...bodies.keys()].join(' | ') +
+      ' — the per-person choice is not being made, or it always lands the same way');
+    for (const [key, n] of bodies) assert(n > 1,
+      `only ${n} of ${got.full} people got ${key} — that is a rounding error, not a mix`);
+    assert(dressedCount === got.full,
+      `${dressedCount} of ${got.full} rigged people are wearing anything`);
+    assert(haired === got.full, `${haired} of ${got.full} rigged people have hair`);
+    /* and the fit really was found: characters.js warns "bare crown" when it is not */
+    const bare = shouts.filter(x => /bare crown|no fit transform/.test(x));
+    assert.deepStrictEqual(bare, [], 'the hair fit was not found: ' + bare.join(' | '));
+    console.log('        %d rigged: %s; all dressed, all with hair', got.full,
+      [...bodies].map(([k, n]) => `${n} on ${k}`).join(', '));
+  } finally { c.dispose(); }
+});
+
+/* ============================================================== H. hair === */
+/* Six static meshes parented to the Head bone, with a per-axis fit keyed by source
+   group and target rig. The fit is what maps Quaternius's wider, shorter skull onto a
+   mannequin's; skip it and every style leaves a bare crown. */
+
+/* highest vertex within `r` of (ax, az) after `mat`: what is directly over the skull */
+function highestOverAxis(geo, mat, ax, az, r) {
+  const pos = geo.attributes.position, v = new THREE.Vector3();
+  let top = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i).applyMatrix4(mat);
+    if (Math.hypot(v.x - ax, v.z - az) <= r && v.y > top) top = v.y;
+  }
+  return top;
+}
+
+/* the Head bone's world matrix in bind pose, and the skull top over its axis */
+function headAndCrown(key) {
+  const meshes = rigParts(RIGS[key].scene);
+  RIGS[key].scene.updateMatrixWorld(true);
+  const head = meshes[0].skeleton.bones.find(b => b.name === MANIFEST[key].headBone);
+  assert(head, `${key} has no ${MANIFEST[key].headBone} bone`);
+  const hp = new THREE.Vector3().setFromMatrixPosition(head.matrixWorld);
+  let crown = -Infinity;
+  for (const m of meshes)
+    crown = Math.max(crown, highestOverAxis(m.geometry, new THREE.Matrix4(), hp.x, hp.z, 0.04));
+  return { head, hp, crown };
+}
+
+/* the transform the manifest says to put on the mesh parented to Head */
+function hairFit(style, key) {
+  const g = hairGroupOf(style);
+  assert(g, `no fit group claims hair style "${style}"`);
+  const f = HAIR.fit[g][key];
+  assert(f && f.scale && f.position, `fit group ${g} has no entry for ${key}`);
+  return new THREE.Matrix4().compose(new THREE.Vector3(...f.position),
+    new THREE.Quaternion(), new THREE.Vector3(...f.scale));
+}
+
+await check('H1', 'every hair style is one static mesh, and the fit covers every body', () => {
+  const styles = Object.keys(HAIR.styles);
+  assert(styles.length >= 6, `only ${styles.length} hair styles`);
+  for (const style of styles) {
+    const h = HAIR_GEO[style];
+    assert(!h.error, `${style} would not parse: ${h.error}`);
+    assert.strictEqual(h.meshes.length, 1, `${style} is ${h.meshes.length} meshes, not one`);
+    const m = h.meshes[0];
+    assert(!m.isSkinnedMesh,
+      `${style} still carries skin data — the bake note says it was collapsed to static`);
+    const pos = m.geometry.attributes.position;
+    assert.strictEqual(pos.count, h.spec.verts, `${style} has ${pos.count} verts, manifest says ${h.spec.verts}`);
+    const tris = (m.geometry.index ? m.geometry.index.count : pos.count) / 3;
+    assert.strictEqual(tris, h.spec.tris, `${style} has ${tris} tris, manifest says ${h.spec.tris}`);
+    assert.strictEqual(m.material.side, THREE.DoubleSide,
+      `${style} is not doubleSided — a single-sided shell shows scalp from behind`);
+    // a fit for this style on every body, or that pairing draws unfitted
+    for (const key of RIG_KEYS) hairFit(style, key);
+  }
+  console.log('        %d styles, each one mesh, fitted for %s',
+    styles.length, RIG_KEYS.join(' + '));
+});
+
+await check('H2', 'fitted hair covers the crown, and skipping the fit bares it', () => {
+  /* The failure mode is invisible without measuring: a bare crown is hair whose inner
+     surface stops under the skull. Measured straight over the Head axis, because a
+     bounding box can clear the skull on a fringe tuft while the crown shows. */
+  for (const key of RIG_KEYS) {
+    const { head, hp, crown } = headAndCrown(key);
+    assert(crown > 1, `${key} crown measured at ${crown} — the head axis found no body`);
+    let worst = Infinity, leastGain = Infinity;
+    for (const style of Object.keys(HAIR.styles)) {
+      const geo = HAIR_GEO[style].meshes[0].geometry;
+      const fitted = new THREE.Matrix4().multiplyMatrices(head.matrixWorld, hairFit(style, key));
+      const over = highestOverAxis(geo, fitted, hp.x, hp.z, 0.04);
+      const bare = highestOverAxis(geo, head.matrixWorld, hp.x, hp.z, 0.04);
+      if (isOverlay(style)) {
+        // facial hair: it must sit on the lower face, not over the skull
+        const bb = new THREE.Box3().setFromBufferAttribute(geo.attributes.position)
+          .applyMatrix4(fitted);
+        assert(bb.max.y < crown - 0.05,
+          `${style} reads as facial hair but reaches y=${bb.max.y.toFixed(3)} against a ` +
+          `crown at ${crown.toFixed(3)}`);
+        continue;
+      }
+      assert(over > crown,
+        `${key}/${style}: the fitted hair tops out at ${over.toFixed(4)} over the head ` +
+        `axis and the skull reaches ${crown.toFixed(4)} — that is a bare crown`);
+      /* and the fit has to be doing the work, or this check would pass unfitted too */
+      assert(over - bare > 0.015,
+        `${key}/${style}: the fit only lifts the crown by ${(over - bare).toFixed(4)} — ` +
+        'either the fit has gone flat or this check no longer proves it is applied');
+      worst = Math.min(worst, over - crown);
+      leastGain = Math.min(leastGain, over - bare);
+    }
+    console.log('        %s: crown cleared by >=%smm, fit worth >=%smm', key,
+      (worst * 1000).toFixed(1), (leastGain * 1000).toFixed(1));
+  }
+});
+
+await check('H3', 'hair parented to Head rides a head-only clip on every body', () => {
+  /* The manifest promises static meshes on the Head bone ride every clip with no
+     skinning. `nod` is head-and-spine only, so movement there is the head, not the
+     root translation a walk would give for free. */
+  const nodSpec = (MANIFEST.extraClips || {}).nod;
+  assert(nodSpec && nodSpec.file, 'the manifest no longer carries a head-only nod clip');
+  const style = Object.keys(HAIR.styles)[0];
+  for (const key of RIG_KEYS) {
+    const root = skeletonClone(RIGS[key].scene);
+    const head = root.getObjectByName(HAIR.attachBone);
+    assert(head, `${key}: no ${HAIR.attachBone} bone survived SkeletonUtils.clone`);
+    const geo = HAIR_GEO[style].meshes[0].geometry;
+    const hair = new THREE.Mesh(geo, new THREE.MeshLambertMaterial());
+    const f = hairFit(style, key);
+    hair.position.setFromMatrixPosition(f);
+    hair.scale.setFromMatrixScale(f);
+    head.add(hair);
+    root.updateMatrixWorld(true);
+    const p0 = new THREE.Vector3().setFromMatrixPosition(hair.matrixWorld);
+    const mixer = new THREE.AnimationMixer(root);
+    const nod = RIGS[key].clips.nod;
+    assert(nod, `${key}: the nod clip did not load`);
+    mixer.clipAction(nod).reset().play();
+    let moved = 0;
+    for (let i = 0; i < 40; i++) {
+      mixer.update(1 / 30);
+      root.updateMatrixWorld(true);
+      moved = Math.max(moved,
+        new THREE.Vector3().setFromMatrixPosition(hair.matrixWorld).distanceTo(p0));
+    }
+    assert(moved > 0.01,
+      `${key}: the hair moved ${moved.toFixed(4)} units through a nod — it is not ` +
+      'following the Head bone, so it will hang in the air as soon as anyone looks up');
+    console.log('        %s: hair tracked the head through %smm of nod',
+      key, (moved * 1000).toFixed(0));
+  }
+});
+
+/* ========================================================== G. garments === */
+/* Clothing skinned by copying each nearest body vertex's weights. The properties that
+   matter are the ones that are invisible until a person moves: a vertex with no weight
+   stays at the origin and drags a triangle across the room, and a bone resolved by
+   index instead of by name lands on a different joint on the 65-bone body. */
+
+const OUTFIT_BODIES = await (async () => {
+  const out = {};
+  for (const key of RIG_KEYS) {
+    if (RIGS[key].error) continue;
+    const meshes = rigParts(RIGS[key].scene);
+    let tris = 0;
+    for (const m of meshes) {
+      const p = m.geometry.attributes.position;
+      tris += (m.geometry.index ? m.geometry.index.count : p.count) / 3;
+    }
+    out[key] = { mesh: meshes[0], bones: meshes[0].skeleton.bones, tris };
+  }
+  return out;
+})();
+
+await check('G1', 'every garment is fully weighted on every body, and stays low-poly', () => {
+  assert(Garments.GARMENTS.length >= 4, 'the garment vocabulary has shrunk: ' + Garments.GARMENTS);
+  for (const key of Object.keys(OUTFIT_BODIES)) {
+    const { mesh, bones, tris: bodyTris } = OUTFIT_BODIES[key];
+    for (const kind of Garments.GARMENTS) {
+      const g = Garments.buildGarment(kind, mesh);
+      const pos = g.attributes.position, sw = g.attributes.skinWeight, si = g.attributes.skinIndex;
+      assert(pos && sw && si, `${key}/${kind} is missing a skinning attribute`);
+      assert.strictEqual(sw.count, pos.count, `${key}/${kind}: a vertex has no weights`);
+      for (let i = 0; i < pos.count; i++) {
+        const sum = sw.getX(i) + sw.getY(i) + sw.getZ(i) + sw.getW(i);
+        assert(sum > 0.99 && sum < 1.01,
+          `${key}/${kind} vertex ${i}: weights sum to ${sum.toFixed(4)} — anything but 1 ` +
+          'moves the vertex somewhere between the bone and the origin');
+        for (const k of ['X', 'Y', 'Z', 'W']) {
+          assert(si['get' + k](i) < bones.length,
+            `${key}/${kind}: skinIndex ${si['get' + k](i)} is past the ${bones.length}-bone skeleton`);
+        }
+        assert(Number.isFinite(pos.getX(i)) && Number.isFinite(pos.getY(i)) &&
+               Number.isFinite(pos.getZ(i)), `${key}/${kind} vertex ${i} is not finite`);
+      }
+      assert(g.boundingSphere && Number.isFinite(g.boundingSphere.radius) &&
+             g.boundingSphere.radius > 0.05,
+        `${key}/${kind}: a NaN or degenerate bounding sphere takes the whole mesh off screen`);
+      const t = g.index.count / 3;
+      assert(t > 20, `${key}/${kind} is ${t} triangles — degenerate`);
+      assert(t < bodyTris / 20,
+        `${key}/${kind} is ${t} triangles against a ${bodyTris}-triangle body — clothing ` +
+        'is worn by 40 rigged people at once and has to cost a fraction of the body');
+    }
+  }
+  console.log('        %d garments on %s, all fully weighted',
+    Garments.GARMENTS.length, Object.keys(OUTFIT_BODIES).join(' + '));
+});
+
+await check('G2', 'a whole outfit is ONE geometry with one group per garment', () => {
+  /* The draw-call promise: a dressed person costs one more call, not one per garment.
+     Every kind at once, which is the widest merge the policy layer could ask for. */
+  for (const key of Object.keys(OUTFIT_BODIES)) {
+    const kinds = Garments.GARMENTS;
+    const out = Garments.buildOutfit(kinds, OUTFIT_BODIES[key].mesh);
+    assert(out.geometry && out.geometry.isBufferGeometry,
+      `${key}: buildOutfit did not return one geometry`);
+    assert.strictEqual(out.groups.length, kinds.length,
+      `${key}: ${out.groups.length} groups for ${kinds.length} garments`);
+    assert.deepStrictEqual(out.groups.map(g => g.kind), [...kinds],
+      `${key}: the groups do not name the kinds asked for, in order`);
+    assert.deepStrictEqual(out.groups.map(g => g.materialIndex), kinds.map((_, i) => i),
+      `${key}: materialIndex must index the caller's material array 0..n-1`);
+    // disjoint and tiling: a gap draws nothing, an overlap draws a garment twice
+    let at = 0;
+    for (const g of [...out.groups].sort((a, b) => a.start - b.start)) {
+      assert.strictEqual(g.start, at,
+        `${key}: group ${g.kind} starts at ${g.start}, previous ended at ${at} — ` +
+        (g.start > at ? 'a gap draws nothing there' : 'an overlap draws it twice'));
+      at = g.start + g.count;
+    }
+    assert.strictEqual(at, out.geometry.index.count,
+      `${key}: the groups cover ${at} of ${out.geometry.index.count} indices`);
+    for (const a of ['position', 'skinIndex', 'skinWeight', 'normal', 'color'])
+      assert(out.geometry.attributes[a] &&
+             out.geometry.attributes[a].count === out.geometry.attributes.position.count,
+        `${key}: the merge lost "${a}" — a merged outfit that dropped its weights is ` +
+        'a shirt standing where the person used to be');
+    console.log('        %s: %d garments -> 1 geometry, %d indices, %d groups', key,
+      kinds.length, out.geometry.index.count, out.groups.length);
+  }
+});
+
+await check('G3', 'garments resolve bones by name, so the 65-bone body fits too', () => {
+  /* The two skeletons order the same joints differently — pelvis is bone 5 on one and 1
+     on the other — so if anything indexed the skeleton by position, the same garment
+     would come back leaning on different joints. Compared as NAMES, which is the thing
+     that has to match; the differing order is asserted so the check keeps its teeth. */
+  const keys = Object.keys(OUTFIT_BODIES);
+  assert(keys.length >= 2, 'only one body is loaded, so this proves nothing');
+  const used = {}, order = {};
+  for (const key of keys) {
+    const { mesh, bones } = OUTFIT_BODIES[key];
+    const names = new Set();
+    for (const kind of Garments.GARMENTS) {
+      const si = Garments.buildGarment(kind, mesh).attributes.skinIndex;
+      for (let i = 0; i < si.count; i++)
+        for (const k of ['X', 'Y', 'Z', 'W']) {
+          const b = bones[si['get' + k](i)];
+          assert(b, `${key}/${kind}: skinIndex ${si['get' + k](i)} names no bone`);
+          names.add(b.name);
+        }
+    }
+    used[key] = [...names].sort();
+    order[key] = used[key].map(n => bones.findIndex(b => b.name === n)).join(',');
+  }
+  const first = keys[0];
+  for (const key of keys.slice(1)) {
+    assert.deepStrictEqual(used[key], used[first],
+      `${key} garments lean on different joints than ${first}'s: ` +
+      [...used[key], ...used[first]].filter(n => !used[key].includes(n) || !used[first].includes(n))
+        .join(' ') + ' — a bone resolved by index, not by name');
+    assert.notStrictEqual(order[key], order[first],
+      `${first} and ${key} now order those joints identically, so building on both no ` +
+      'longer proves anything about index-based lookup — find a sharper fixture');
+  }
+  console.log('        %d joints, same names on every body, different indices on each',
+    used[first].length);
 });
 
 /* ================================================== X. the two views agree === */

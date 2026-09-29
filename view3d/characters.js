@@ -56,7 +56,7 @@ export const GESTURE_KEYS = ['point', 'typefast', 'headscratch', 'handoff', 'loo
 const SYNTH = ['desk', 'headscratch', 'lookup'];
 /* additive layers blend on top of the base clip, so they are safe over a walk or
    a seated pose. Everything else is a full-body one-shot that replaces the base. */
-const ADDITIVE = new Set([...SYNTH, 'nod']);
+const ADDITIVE = new Set([...SYNTH, 'nod', 'shake']);
 
 /* fallback only: used when assets/manifest.json cannot be read and the clips have
    to be recognised by name inside whatever .glb turns up. */
@@ -108,21 +108,77 @@ const DEFAULTS = {
      clear the back of the cushion and still rest on its front face, without pushing a
      foot into the desk. selfTest holds the window; do not nudge it by eye. */
   sitFwd: 0.14,
+  /* Measured: M_Joints is 8012 of the male rig's 13744 triangles (8197 of 14612 on the
+     female), 91% of it finger balls, and not one of its 49 balls sits over empty
+     M_Main — so hiding it opens no hole and loses no silhouette. It is also the
+     segmentation that reads as a jointed doll. Set false to see the joints again. */
+  hideJoints: true,
+  female: true,       // deal the second rig, per person, off p.h
+  hair: true,
+  garments: true,
+  face: true,         // false leaves the blank mannequin head
+  fidget: 17,         // seconds per micro-behaviour beat; 0 turns it off
 };
 
 /* Clip suffixes load() resolves; '' is the manifest's preferred default, so a rig
    carrying only the defaults still works (setClip falls back). */
 const VARIANTS = { walk: ['', '2'], idle: ['', '2', '3'] };
 
-/* There is no clothing geometry, so shirt / trousers / skin comes out of the mesh
-   itself, split by the bone that skins each vertex hardest. See splitRegions. */
-const R_SKIN = 0, R_SHIRT = 1, R_TROUSER = 2;
+/* The body mesh is split into four contiguous index ranges by the bone that skins each
+   vertex hardest (see splitRegions). Bare, they are the outfit: skin, shirt, trousers.
+   Dressed, a range a garment fully encloses is given an invisible material, which three
+   skips entirely — so a covered body range costs no draw call AND cannot poke through
+   the cloth over it. The boundaries are measured, not assumed:
+
+     R_SHIRT   spine/clavicle/upperarm/lowerarm — under topLong's shell and its
+               sleeve, which reaches wristX - 0.02. Hidden whenever a top is worn.
+     R_TROUSER pelvis + thigh, measured y 0.5245-1.0775. Trousers cover 0.133-0.967
+               and the shell covers from 0.847 up, so together the whole range.
+               A skirt covers it too, as long as its hem is AT the thigh/calf vertex
+               boundary — which is why outfitFor measures the knee instead of taking
+               garments.js's 0.62 default, 10 cm above it.
+     R_SHIN    calf + foot, y 0.0996-0.5135. Never hidden: trousers stop at
+               ankleY + 0.03, so the last 3 cm is a foot, and under a skirt the whole
+               range is a bare leg. Tinted trouser or skin instead.
+
+   A height split would not work for the arms — the rig is T-posed, so every arm vertex
+   sits at shoulder height (measured: upperarm 1.373-1.521). */
+const R_SKIN = 0, R_SHIRT = 1, R_TROUSER = 2, R_SHIN = 3, R_N = 4;
 const SKIN_BONES = /^(Head|neck_01|hand_|index_|middle_|ring_|pinky_|thumb_)/;
-const LEG_BONES = /^(pelvis|thigh_|calf_|foot_|ball_)/;
+const HIP_BONES = /^(pelvis|thigh_)/;
+const SHIN_BONES = /^(calf_|foot_|ball_)/;
 const regionOfBone = n =>
-  SKIN_BONES.test(n) ? R_SKIN : LEG_BONES.test(n) ? R_TROUSER : R_SHIRT;
+  SKIN_BONES.test(n) ? R_SKIN : HIP_BONES.test(n) ? R_TROUSER
+    : SHIN_BONES.test(n) ? R_SHIN : R_SHIRT;
 // M_Joints is ball joints, three quarters of it finger balls: one dark tone
 const JOINT_MAT = /joint/i;
+
+/* Hair, dealt by gender. Weighted lists rather than a weighting table: a buzz is
+   rarer than a full head, and a duplicate entry says so in one character. */
+const HAIR_F = ['long', 'long', 'buns', 'buns', 'buzzedFemale'];
+const HAIR_M = ['parted', 'parted', 'buzzed'];
+/* Silhouette volume on the cheap LOD, as a multiple of the head sphere. Under 1.05
+   there is nothing to draw — a buzz IS the bare crown. */
+const HAIR_VOL = { long: 1.16, buns: 1.18, buzzedFemale: 1.03, parted: 1.10, buzzed: 1.03 };
+/* garments.js's own kinds. Women get a skirt or a dress twice as often as trousers,
+   which is what puts both on the floor without dressing the office as a uniform. */
+const LOWER_F = ['trousers', 'trousers', 'skirt', 'skirt', 'dress'];
+/* The hue carries the team, so the top carries the hue; the bottom comes off the
+   neutral fabric ladder. A dress is two of her kinds in one tone — see buildOf. */
+const CLOTH_TONE = { top: 'shirt', topLong: 'shirt', trousers: 'trouser',
+                     skirt: 'trouser', jacket: 'jacket' };
+/* Micro-behaviour, all additive and all already loaded for something else. */
+const FIDGET = ['lookup', 'nod', 'shake', 'headscratch'];
+
+/* Clips whose first and last frames do not meet, so LoopRepeat snaps at the seam.
+   Measured on the real rig, first vs last frame, worst non-finger bone: walk 0.1 cm,
+   walk2 0.6, idle 0.3, idle2 0.1, idle3 0.0, talk 0.0, type 0.0 — and search 8.6 cm at
+   the forearm, 14.5 at the fingertips. `search` is 0.9-4.0 s cut out of a clip that
+   stands up at the end, so on repeat every person at a filing cabinet threw a hand 9 cm
+   across one frame, every 3 seconds. That was the involuntary motion. PingPong plays it
+   forward then backward: no seam at either end, and a reach in and back out is what
+   rummaging in a cabinet looks like anyway. */
+const PINGPONG = new Set(['search']);
 
 /* the rig's own bone names, from the manifest. Only these are ever touched. */
 const BONES = {
@@ -166,11 +222,30 @@ export function buildOf(h, boss, o) {
     const opts = VARIANTS[key];
     return opts[((m >>> at) >>> 0) % opts.length];
   };
+  /* Gender, hair and outfit come off a SECOND avalanche of the same p.h, not a second
+     slice of the first: Knuth's multiply mixes its high bits well and its low ones
+     barely at all, and materials.js already reads the low slices for shirt, trouser,
+     skin and hair colour. One more xor-and-multiply is cheaper than a bit budget. */
+  const g = mixHash((h >>> 0) ^ 0x9e3779b9);
+  const female = ((g >>> 31) & 1) === 1;
+  const styles = female ? HAIR_F : HAIR_M;
+  const low = female && !boss ? LOWER_F[(g >>> 19) % LOWER_F.length] : 'trousers';
+  const dress = low === 'dress';
   return {
     hy, hw: hy * wRel,
     // fixed for a boss, dealt for everyone else: arms folded is the cheapest way the
     // rig can say who is in charge, and a rank that varies is not a rank
     variant: { walk: boss ? '' : pick('walk', 26), idle: boss ? '2' : pick('idle', 28) },
+    female,
+    hair: styles[(g >>> 27) % styles.length],
+    beard: !female && ((g >>> 23) & 3) === 0,
+    dress,
+    skirt: dress || low === 'skirt',
+    /* Always the long sleeve. garments.js's short-sleeved `top` stops at mid upper arm,
+       which would leave R_SHIRT only half covered and so undroppable — and an outer
+       upper arm showing through a shell is the poke-through we are removing.
+       The boss's suit is fixed, and the jacket is one of his five identity cues. */
+    outfit: boss ? ['topLong', 'trousers', 'jacket'] : ['topLong', dress ? 'skirt' : low],
   };
 }
 
@@ -215,10 +290,22 @@ export function createCharacters(opts = {}) {
   const scratch = new THREE.Object3D();
   const color = new THREE.Color();
 
+  /* `template` is the male rig AND the measurement reference: every synthesised layer
+     and the facing are measured off it, and the two rigs share one skeleton with the
+     same rest orientations. `templates.f` is the female rig or null. */
   let template = null, clips = {}, gen = 0, yaw0 = 0;
+  const templates = { rig: null, rigFemale: null };
+  let Garm = null, merge = null;                 // garments.js, BufferGeometryUtils
+  /* Did we load the rigs and hair ourselves? load(pre) takes a scene the CALLER parsed,
+     and dispose() must not tear down buffers somebody else is still drawing with. */
+  let owned = false;
+  const hairSrc = {};                            // style -> source geometry
+  let hairFit = null;
+  const hairGeo = new Map();                     // style(+beard)|rigKey -> fitted geometry
+  const outfits = new Map();                     // rigKey|kinds -> Rhea's { geometry, groups }
   const info = {
-    mode: 'primitive', rig: null, clips: {}, synth: [], missing: [],
-    full: 0, cheap: 0, notes: [],
+    mode: 'primitive', rig: null, rigFemale: null, clips: {}, synth: [], missing: [],
+    hair: [], outfits: 0, full: 0, cheap: 0, notes: [],
   };
   const warn = m => { info.notes.push(m); console.warn('[characters] ' + m); };
 
@@ -234,11 +321,27 @@ export function createCharacters(opts = {}) {
      the legs, since a cylinder cannot show a thigh going forward. Neighbouring parts
      OVERLAP a couple of centimetres: butted exactly, the bob opens a slit at the
      waist and neck. */
+  /* hemY/hemS are the skirt band: the SAME span the rig's garment covers — hip to knee,
+     bare below — so a skirt does not become a floor-length bell when a person crosses
+     the LOD line. It is a second instance of the leg cylinder, flipped end for end so
+     its taper runs the other way (see putPart), which costs no extra draw call. */
   const POSE = {
-    stand: { legY: 0.50, legS: 1, torsoY: 1.19, torsoS: 1, headY: 1.67 },
-    sit: { legY: 0.34, legS: 0.62, torsoY: 0.86, torsoS: 0.85, headY: 1.20 },
+    stand: { legY: 0.50, legS: 1, torsoY: 1.19, torsoS: 1, headY: 1.67,
+             hemY: 0.40, hemS: 0.30 },
+    sit: { legY: 0.34, legS: 0.62, torsoY: 0.86, torsoS: 0.85, headY: 1.20,
+           hemY: 0.34, hemS: 0.24 },
   };
   const matCheap = new THREE.MeshLambertMaterial();
+  /* Sources for tinted() only, never rendered as they are. Both double-sided: the hair
+     is authored that way and a skirt is seen from inside it every time somebody sits. */
+  const matHair = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+  const matCloth = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+  // flat quads laid on the skull: double-sided, so a winding we did not author cannot
+  // turn the whole face invisible, which is the bug this exists to fix
+  const matFace = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+  /* A body range that a garment encloses. three skips a group whose material is not
+     visible, so this is genuinely not drawn — no draw call, nothing to poke through. */
+  const matHidden = new THREE.MeshBasicMaterial({ visible: false });
   // blob shadow, not a shadow map: 135 characters cannot afford real ones
   const matBlob = new THREE.MeshBasicMaterial({
     color: 0x000000, transparent: true, opacity: 0.3, depthWrite: false,
@@ -270,6 +373,12 @@ export function createCharacters(opts = {}) {
   async function load(pre) {
     if (pre && pre.scene) {
       info.rig = 'preloaded';
+      // pre.female / pre.hair / pre.garments let a headless harness reach the same
+      // code the browser does; without them everyone is dealt the one rig, bare
+      if (o.female && pre.female) { templates.rigFemale = pre.female; info.rigFemale = 'preloaded'; }
+      if (pre.hair) { Object.assign(hairSrc, pre.hair.styles || {}); hairFit = pre.hair.fit || null; }
+      if (o.garments && pre.garments) Garm = pre.garments;
+      if (pre.merge) merge = pre.merge;
       if (pre.clips) { template = pre.scene; clips = { ...pre.clips }; prepare(); }
       else adoptPool(pre.scene, pre.animations || [], 'preloaded');
       return info;
@@ -290,14 +399,34 @@ export function createCharacters(opts = {}) {
     try { man = await (await fetch(new URL(o.manifest, base))).json(); }
     catch (e) { warn('assets/manifest.json unreadable (' + (e && e.message) + ')'); }
 
+    const at = f => new URL(f.replace(/^assets\//, ''), base).href;
+    owned = true;                  // everything below is ours to dispose
     const rigFile = (man && man.rig && man.rig.file) || 'assets/rig-human.glb';
     let rig;
-    try { rig = await loader.loadAsync(new URL(rigFile.replace(/^assets\//, ''), base).href); }
+    try { rig = await loader.loadAsync(at(rigFile)); }
     catch (e) {
       warn('rig ' + rigFile + ' failed (' + (e && e.message) + ') — capsule stand-ins only');
       return info;
     }
     info.rig = rigFile;
+
+    /* The second rig is optional in both directions: without it every person is dealt
+       the male one, which is what shipped before. Its 65 bones are a subset of the
+       male 71 and the 6 it lacks are exactly the unanimated ones, so the clips bind. */
+    if (o.female && man && man.rigFemale && man.rigFemale.file) {
+      try {
+        templates.rigFemale = (await loader.loadAsync(at(man.rigFemale.file))).scene;
+        info.rigFemale = man.rigFemale.file;
+      } catch (e) { warn('female rig failed (' + (e && e.message) + ') — one rig only'); }
+    }
+    // beard-over-hair merges into one mesh, so a bearded man is still one draw call
+    try { ({ mergeGeometries: merge } = await import('../vendor/BufferGeometryUtils.js')); }
+    catch (e) { warn('BufferGeometryUtils unavailable — no beards'); }
+    if (o.hair && man && man.hair) await loadHair(loader, at, man.hair);
+    if (o.garments) {
+      try { Garm = await import('./garments.js'); }
+      catch (e) { warn('garments.js unavailable (' + (e && e.message) + ') — bare rigs'); }
+    }
 
     if (!man || !man.clips) {
       // no manifest: the rig might be a single .glb carrying its own clips
@@ -315,6 +444,7 @@ export function createCharacters(opts = {}) {
       wanted.idle3 = man.extraClips.idle_phone;
     }
     if (o.nodOnPrompt && man.extraClips) wanted.nod = man.extraClips.nod;
+    if (o.fidget && man.extraClips) wanted.shake = man.extraClips.shake;
 
     const got = await Promise.all(Object.entries(wanted).map(async ([key, spec]) => {
       if (!spec || !spec.file) return [key, null];
@@ -356,16 +486,25 @@ export function createCharacters(opts = {}) {
       template = null;
       return;
     }
-    let split = 0;
-    template.traverse(c => {
-      if (!c.isMesh) return;
-      c.castShadow = c.receiveShadow = false;    // blob shadows only
-      c.frustumCulled = false;                   // a skinned bbox is the bind pose and pops
-      // on the TEMPLATE: clone shares geometry, so one partition dresses all 40 rigs
-      if (!JOINT_MAT.test((c.material && c.material.name) || '') && splitRegions(c)) split++;
-    });
-    info.notes.push(split ? 'split ' + split + ' mesh into skin/shirt/trouser ranges'
+    templates.rig = template;
+    let split = 0, hidden = 0, tris = 0;
+    for (const t of [templates.rig, templates.rigFemale]) {
+      if (!t) continue;
+      t.traverse(c => {
+        if (!c.isMesh) return;
+        c.castShadow = c.receiveShadow = false;  // blob shadows only
+        c.frustumCulled = false;                 // a skinned bbox is the bind pose and pops
+        const n = (c.material && c.material.name) || '';
+        // on the TEMPLATE: clone shares geometry, so one partition dresses all 40 rigs
+        if (!JOINT_MAT.test(n)) { c.userData.body = true; if (splitRegions(c)) split++; }
+        else if (o.hideJoints) { c.visible = false; hidden++; }
+        if (c.visible) tris += (c.geometry.index ? c.geometry.index.count : 0) / 3;
+      });
+    }
+    info.notes.push(split ? 'split ' + split + ' mesh into ' + R_N + ' skin/cloth ranges'
                           : 'no mesh could be partitioned — one tone per person');
+    if (hidden) info.notes.push('hid ' + hidden + ' ball-joint mesh, ' + tris + ' tris left');
+    info.hair = Object.keys(hairSrc);
 
     let pruned = 0;
     for (const key in clips) { stripRootDrift(clips[key]); pruned += pruneStatic(clips[key]); }
@@ -380,6 +519,7 @@ export function createCharacters(opts = {}) {
       clips.search = THREE.AnimationUtils.subclip(clips.search, 'search_hold', 27, 120, 30);
     }
     if (clips.nod) clips.nod = headOnlyAdditive(clips.nod, 'nod', 36, 30);
+    if (clips.shake) clips.shake = headOnlyAdditive(clips.shake, 'shake', 45, 30);
 
     yaw0 = o.yawOffset === null ? measureFacing() : o.yawOffset;
     buildAdditive();
@@ -396,8 +536,8 @@ export function createCharacters(opts = {}) {
     gen++;        // stand-ins already on the floor upgrade on the next sync
   }
 
-  /* Re-order the index buffer into three contiguous ranges so one mesh draws as skin,
-     shirt and trousers with three shared materials and no per-person geometry.
+  /* Re-order the index buffer into R_N contiguous ranges so one mesh draws as skin,
+     shirt, trousers and shins with shared materials and no per-person geometry.
      By dominant bone, never by height: the hands sit at 0.92 in bind pose, right in
      the middle of the torso's band. */
   function splitRegions(mesh) {
@@ -417,7 +557,7 @@ export function createCharacters(opts = {}) {
       vreg[i] = b ? regionOfBone(b.name) : R_SHIRT;
     }
     const idx = g.index.array, tris = idx.length / 3;
-    const buckets = [[], [], []];
+    const buckets = Array.from({ length: R_N }, () => []);
     for (let t = 0; t < tris; t++) {
       const a = vreg[idx[t * 3]], b = vreg[idx[t * 3 + 1]], c = vreg[idx[t * 3 + 2]];
       buckets[a === b || a === c ? a : b === c ? b : a].push(t);
@@ -426,7 +566,7 @@ export function createCharacters(opts = {}) {
     const out = new idx.constructor(idx.length);
     let at = 0;
     g.clearGroups();
-    for (let r = 0; r < 3; r++) {
+    for (let r = 0; r < R_N; r++) {
       const start = at;
       for (const t of buckets[r]) {
         out[at++] = idx[t * 3]; out[at++] = idx[t * 3 + 1]; out[at++] = idx[t * 3 + 2];
@@ -436,8 +576,120 @@ export function createCharacters(opts = {}) {
     g.index.set(out);
     g.index.needsUpdate = true;
     // one entry per region, replaced by paint(); Mesh.copy slices the array
-    mesh.material = [mesh.material, mesh.material, mesh.material];
+    mesh.material = new Array(R_N).fill(mesh.material);
     return true;
+  }
+
+  /* ---------------------------------------------------------------- hair --- */
+
+  /* Static meshes already in Head-bone local space, so parenting one to `Head` makes
+     it ride all 18 clips with no skinning and no rebinding. */
+  async function loadHair(loader, at, spec) {
+    hairFit = spec.fit || null;
+    await Promise.all(Object.entries(spec.styles || {}).map(async ([k, s]) => {
+      try {
+        const g = await loader.loadAsync(at(s.file));
+        let mesh = null;
+        g.scene.traverse(x => { if (x.isMesh && !mesh) mesh = x; });
+        if (mesh) hairSrc[k] = mesh.geometry;
+      } catch (e) { warn('hair ' + k + ' failed: ' + (e && e.message)); }
+    }));
+    info.hair = Object.keys(hairSrc);
+  }
+
+  /* These were authored on a wider, shorter skull than either mannequin's, so the
+     manifest carries a per-axis scale and offset keyed by source group and target
+     rig. Skipping it leaves every style floating off a bare crown. */
+  function fittedHair(style, rigKey) {
+    const key = style + '|' + rigKey;
+    if (hairGeo.has(key)) return hairGeo.get(key);
+    let g = null;
+    const src = hairSrc[style];
+    if (src) {
+      const grp = Object.values(hairFit || {})
+        .find(f => f && Array.isArray(f.appliesTo) && f.appliesTo.includes(style));
+      const t = grp && grp[rigKey];
+      g = src.clone();
+      if (t) { g.scale(t.scale[0], t.scale[1], t.scale[2]); g.translate(...t.position); }
+      else warn('no fit transform for hair ' + style + ' on ' + rigKey + ' — bare crown');
+    }
+    hairGeo.set(key, g);
+    return g;
+  }
+
+  function hairGeometry(style, beard, rigKey) {
+    const key = style + (beard ? '+beard' : '') + '|' + rigKey;
+    if (hairGeo.has(key)) return hairGeo.get(key);
+    const hair = fittedHair(style, rigKey);
+    const chin = beard ? fittedHair('beard', rigKey) : null;
+    let g = hair;
+    if (hair && chin && merge) {
+      try { g = merge([hair, chin]) || hair; }
+      catch (e) { warn('beard would not merge onto ' + style + ': ' + (e && e.message)); }
+    }
+    hairGeo.set(key, g);
+    return g;
+  }
+
+  /* ---------------------------------------------------------------- face --- */
+
+  /* garments.js measures the eyes and brows off each rig's own skull and hands back a
+     static Head-local geometry, so it rides every clip exactly as the hair does. The
+     three expressions are shared per rig: changing one is a pointer swap, not a rebuild.
+     Its own mesh rather than merged into the hair, because the features have to stay
+     dark on a fair-haired person — merged, they would take the hair's colour. */
+  const EXPR_FOR = { meet: 'talk', type: 'focus', file: 'focus' };
+  const exprOf = state => (o.face && EXPR_FOR[state]) || 'idle';
+
+  function faceGeometry(rigKey, expr) {
+    const key = 'face|' + rigKey + '|' + expr;
+    if (hairGeo.has(key)) return hairGeo.get(key);
+    let g = null;
+    const head = templates[rigKey] && templates[rigKey].getObjectByName(BONES.head);
+    if (Garm && Garm.buildFace && head) {
+      try { g = Garm.buildFace(head, { expression: expr }); }
+      catch (e) { warn('face ' + key + ' failed: ' + (e && e.message)); }
+    }
+    hairGeo.set(key, g);
+    return g;
+  }
+
+  /* ------------------------------------------------------------ garments --- */
+
+  const bodyOf = root => {
+    let m = null;
+    root.traverse(x => { if (x.isSkinnedMesh && x.userData.body && !m) m = x; });
+    return m;
+  };
+
+  /* Rhea merges the requested kinds into ONE geometry with a material group each, and
+     it is built off the TEMPLATE's body, so every person wearing the same outfit shares
+     it — one build per outfit, not per person. */
+  function outfitFor(b) {
+    const rigKey = b.female && templates.rigFemale ? 'rigFemale' : 'rig';
+    const key = rigKey + '|' + b.outfit.join(',');
+    if (outfits.has(key)) return outfits.get(key);
+    let out = null;
+    const body = bodyOf(templates[rigKey]);
+    if (Garm && body && b.outfit.length) {
+      /* The hem lands ON the thigh/calf vertex boundary, measured off this rig's own
+         knee, not on garments.js's 0.62 default — 10 cm higher, which would leave a
+         bare thigh below a hidden R_TROUSER range. A dress is the same hem in the
+         top's tone: at this camera one colour head to hem is the cue, not the length. */
+      try { out = Garm.buildOutfit(b.outfit, body, { skirtHem: kneeOf(rigKey) }); }
+      catch (e) { warn('outfit ' + key + ' failed: ' + (e && e.message)); }
+    }
+    outfits.set(key, out);
+    info.outfits = [...outfits.values()].filter(Boolean).length;
+    return out;
+  }
+
+  function kneeOf(rigKey) {
+    const t = templates[rigKey];
+    if (!t) return undefined;
+    t.updateMatrixWorld(true);              // bind pose; nothing else reads it stale
+    const knee = t.getObjectByName('calf_l');
+    return knee ? knee.getWorldPosition(new THREE.Vector3()).y - 0.012 : undefined;
   }
 
   /* Root motion is baked into the locomotion clips: walk_loop translates `root`
@@ -668,24 +920,36 @@ export function createCharacters(opts = {}) {
      crept and the cache grew an entry per mesh per flip for the whole session. */
   function paint(a, p, idle, back) {
     const pal = palOf(a, p, idle);
-    const tone = [pal.skin, pal.shirt, pal.trouser];
+    // bare, the four ranges ARE the outfit; a bare shin under a skirt is skin, not cloth
+    const tone = [pal.skin, pal.shirt, pal.trouser, a.dressed ? pal.skin : pal.trouser];
     a.root.traverse(ch => {
       if (!ch.isMesh) return;
-      const src = ch.userData.srcMat;
-      ch.material = Array.isArray(src)
-        ? src.map((s, r) => tinted(s, tone[r] || pal.shirt, back))
-        : tinted(src, JOINT_MAT.test(src.name || '') ? pal.joint : pal.shirt, back);
+      const src = ch.userData.srcMat, u = ch.userData;
+      if (u.tones) { ch.material = u.tones.map(k => tinted(matCloth, pal[k], back)); return; }
+      if (u.hair) { ch.material = tinted(matHair, pal.hair, back); return; }
+      if (u.face) { ch.material = tinted(matFace, pal.face, back); return; }
+      if (!Array.isArray(src)) {
+        ch.material = tinted(src, JOINT_MAT.test(src.name || '') ? pal.joint : pal.shirt, back);
+        return;
+      }
+      ch.material = src.map((s, r) => (a.cover && a.cover[r]) ? matHidden
+        : tinted(s, tone[r] || pal.shirt, back));
     });
   }
 
   // declared once, not per person per frame: a closure over the loop body is 95
   // allocations a frame for no gain
-  function putPart(mesh, i, col, x, z, a, y, sy, lift, pitch, back) {
-    const b = a.build;
+  /* `sw` widens XZ (a skirt hem, a head of hair) and `flip` turns a part end for end:
+     the leg cylinder is wide at the waist and narrow at the ankle, so upside down and
+     widened it is the tapered cone a skirt needs, with no second geometry and no
+     second draw call. A 180-degree X rotation is proper, so the winding survives. */
+  function putPart(mesh, i, col, x, z, a, y, sy, lift, pitch, back, sw, flip) {
+    const b = a.build, w = b.hw * (sw || 1);
     scratch.position.set(x, y * b.hy + lift, z);
     scratch.quaternion.copy(a.q);
-    if (pitch) scratch.rotateX(pitch);
-    scratch.scale.set(b.hw, b.hy * sy, b.hw);
+    const rx = pitch + (flip ? Math.PI : 0);
+    if (rx) scratch.rotateX(rx);
+    scratch.scale.set(w, b.hy * sy, w);
     scratch.updateMatrix();
     mesh.setMatrixAt(i, scratch.matrix);
     color.copy(col);
@@ -718,13 +982,62 @@ export function createCharacters(opts = {}) {
       build: buildOf(hashOf(p), !!p.boss, o),
       root: null, mixer: null, acts: null, base: null, baseKey: '',
       shot: null, addShot: null, desk: null, fastT: 0,
-      pulse: null, pulseT: 0,
+      pulse: null, pulseT: 0, dressed: false, cover: null, beat: null,
+      face: null, expr: '', rigKey: 'rig',
       gesture: p.gesture || '', lastEvent: p.last,
       q: new THREE.Quaternion().setFromEuler(new THREE.Euler(0, (FACE_YAW[p.face] || 0) + yaw0, 0)),
       px: p.x, pz: p.y, ground: 0, idle: null, hue: -1, back: null,
       pal: null, palHue: -1, palIdle: null,
       sitOff: p.state === 'type' ? o.sitFwd : 0,     // 0..o.sitFwd
     };
+  }
+
+  /* Clothes and hair onto one cloned rig. Called before srcMat is stamped, so paint()
+     picks both up with everything else. a.cover says which body ranges are inside
+     cloth: paint() gives those an invisible material, which three skips outright — so
+     they cost no draw call and, more to the point, cannot poke through what covers
+     them. That is the exact fix for a shoulder pressing out of a sleeve. */
+  function dress(a, root, rigKey) {
+    const b = a.build;
+    const out = outfitFor(b);
+    a.dressed = false;
+    a.cover = null;
+    if (out) {
+      const k = b.outfit;
+      a.cover = [];
+      a.cover[R_SHIRT] = k.includes('topLong') || k.includes('jacket');
+      a.cover[R_TROUSER] = k.includes('trousers') || k.includes('skirt');
+      // R_SHIN is never covered: trousers stop at ankleY + 0.03 and a skirt at the knee
+      const body = bodyOf(root);
+      /* Its own Skeleton over the SAME bones: three counts one skeleton per skinned
+         mesh, and sharing the object would read as the plain-clone bug K6 pins. */
+      const sk = new THREE.Skeleton(body.skeleton.bones, body.skeleton.boneInverses);
+      const mesh = new THREE.SkinnedMesh(out.geometry, out.groups.map(() => matCloth));
+      mesh.userData.tones = out.groups.map(gr =>
+        b.dress ? 'shirt' : (CLOTH_TONE[gr.kind] || 'shirt'));
+      mesh.frustumCulled = false;
+      mesh.castShadow = mesh.receiveShadow = false;
+      root.add(mesh);
+      mesh.bind(sk, body.bindMatrix);
+      // a skirt or a dress leaves the shins bare, so they are skin and not trouser cloth
+      a.dressed = true;
+    }
+    const head = root.getObjectByName(BONES.head);
+    if (!head) return;
+    const hair = o.hair && hairGeometry(b.hair, b.beard, rigKey);
+    if (hair) head.add(headPart(hair, matHair, { hair: true }));
+    a.expr = exprOf(a.p.state);
+    a.rigKey = rigKey;
+    const face = o.face && faceGeometry(rigKey, a.expr);
+    if (face) head.add(a.face = headPart(face, matFace, { face: true }));
+  }
+
+  function headPart(geo, mat, tag) {
+    const m = new THREE.Mesh(geo, mat);
+    Object.assign(m.userData, tag);
+    m.frustumCulled = false;                  // parented to a bone; its bbox is bind pose
+    m.castShadow = m.receiveShadow = false;
+    return m;
   }
 
   function actionFor(a, key) {
@@ -735,15 +1048,17 @@ export function createCharacters(opts = {}) {
   }
 
   function upgrade(a) {
-    const p = a.p;
+    const p = a.p, b = a.build;
+    const rigKey = b.female && templates.rigFemale ? 'rigFemale' : 'rig';
     // SkeletonUtils.clone: a plain .clone() shares the skeleton and everyone
     // animates identically. The rig has TWO skinned meshes; clone handles both.
-    const root = skeletonClone(template);
+    const root = skeletonClone(templates[rigKey]);
     /* Root scale scales the posed result, so the shared `desk` layer's 0.75 target
        lands at 0.75 * hy and a short person's hands rest ~7 cm under the desk.
        Accepted, deliberately: per-person would mean 40 clips, and the desk occludes
        it at this camera. Do not "fix" it by dropping the height spread. */
-    root.scale.set(a.build.hw, a.build.hy, a.build.hw);
+    root.scale.set(b.hw, b.hy, b.hw);
+    dress(a, root, rigKey);
     // kept so paint() never tints a tinted material
     root.traverse(ch => { if (ch.isMesh) ch.userData.srcMat = ch.material; });
     const mixer = new THREE.AnimationMixer(root);
@@ -776,6 +1091,7 @@ export function createCharacters(opts = {}) {
     // never disposed here, only in dispose()
     a.root = null; a.mixer = null; a.acts = null;
     a.base = null; a.shot = null; a.addShot = null; a.desk = null;
+    a.dressed = false; a.cover = null; a.face = null; a.expr = '';
     a.lod = 'cheap';
   }
 
@@ -789,7 +1105,7 @@ export function createCharacters(opts = {}) {
     if (a.shot) { a.shot.fadeOut(fade || o.gestureFade); a.shot = null; }
     if (next === a.base) { a.baseKey = key; return; }
     next.enabled = true;
-    next.setLoop(THREE.LoopRepeat, Infinity);
+    next.setLoop(PINGPONG.has(key) ? THREE.LoopPingPong : THREE.LoopRepeat, Infinity);
     next.clampWhenFinished = false;
     next.setEffectiveTimeScale(1);
     next.setEffectiveWeight(1);
@@ -837,6 +1153,10 @@ export function createCharacters(opts = {}) {
 
     if (ADDITIVE.has(gesture)) {
       const act = actionFor(a, gesture);
+      /* One additive slot. Two layers rotating the same head at once — a nod on a
+         prompt landing over a lookup — is the twitch that reads as a dance, and the
+         finished listener only ever re-arms the one it is holding. */
+      if (a.addShot && a.addShot !== act) a.addShot.stop();
       act.reset();
       act.enabled = true;
       act.setLoop(THREE.LoopOnce, 1);
@@ -886,8 +1206,8 @@ export function createCharacters(opts = {}) {
 
     const wantFull = template && info.mode === 'rig'
       ? chooseFull(list, focus, o.maxFull) : new Set();
-    let nCheap = 0, nAll = 0;
-    ensureCap(list.length);
+    let nCheap = 0, nAll = 0, nHead = 0, nLeg = 0;
+    ensureCap(list.length * 2);          // a stand-in can draw two heads and two legs
 
     for (const p of list) {
       let a = avatars.get(p.key);
@@ -900,12 +1220,21 @@ export function createCharacters(opts = {}) {
         upgrade(a);
       } else if (want === 'cheap' && a.lod !== 'cheap') downgrade(a);
 
-      /* ground speed, measured not nominal: the personal-space shove and the
-         slow-down into a waypoint both change it, and the feet have to follow
-         the floor, not p.speed */
+      /* ground speed, measured not nominal: the slow-down into a waypoint changes it
+         and the feet have to follow the floor, not p.speed.
+
+         Gated on actually walking, and that gate is the fix for the wobble that read
+         as dancing. sim.js's personal-space shove moves p.x/p.y of EVERY person in a
+         room, seated ones included, by up to .03 a frame — twice a walk step at the
+         current 1.06-1.49 tiles/s. Ungated, the yaw below aimed down that shove, so a
+         person at a desk spun to face whoever was next to them and slerped back, every
+         frame, for as long as they sat there. */
+      const moving = p.state === 'walk' || p.state === 'leaving';
       const dx = p.x - a.px, dz = p.y - a.pz, d = Math.hypot(dx, dz);
       const teleport = d > 1.5 || ff;
-      if (dt > 0) a.ground += ((teleport ? 0 : d / dt) - a.ground) * Math.min(1, dt * 8);
+      if (dt > 0) {
+        a.ground += ((teleport || !moving ? 0 : d / dt) - a.ground) * Math.min(1, dt * 8);
+      }
       a.px = p.x; a.pz = p.y;
 
       /* p.gesture is PERSISTENT — Ishita sets it per tool call and clears it
@@ -925,7 +1254,8 @@ export function createCharacters(opts = {}) {
 
       /* aim down the movement vector while walking (smooth, and already
          lane-offset by the sim) and at p.face once parked */
-      const yaw = (!teleport && d > 0.004 ? Math.atan2(dx, dz) : FACE_YAW[p.face] || 0) + yaw0;
+      const yaw = (moving && !teleport && d > 0.004
+        ? Math.atan2(dx, dz) : FACE_YAW[p.face] || 0) + yaw0;
       turnTo(a.q, yaw, o.turnRate, dt, ff);
       const seated = p.state === 'type';
       const isIdle = clock - p.last > idleAfter;
@@ -938,6 +1268,22 @@ export function createCharacters(opts = {}) {
       const sitTo = seated ? o.sitFwd : 0;
       a.sitOff = ff ? sitTo : a.sitOff + (sitTo - a.sitOff) * Math.min(1, dt * 6);
       const ox = p.x + fwd[0] * a.sitOff, oz = p.y + fwd[1] * a.sitOff;
+
+      /* Occasional micro-behaviour, so a desk is not one pose for ten minutes: a
+         glance, a nod, a head shake, a scratch. The beat comes off p.h and the sim
+         clock, so a replay reproduces it, and seven beats in eight are nothing —
+         somebody who fidgets every few seconds reads worse than somebody sitting
+         still. Full rigs only: a 0.1 rad pitch on a capsule is a wobble, not a glance,
+         and it would put a wall-clock into the instanced buffers D3 compares. */
+      if (o.fidget && !ff && !g && a.lod === 'full' && !a.shot && !a.addShot &&
+          p.state !== 'leaving') {
+        const beat = Math.floor((clock + (a.h % 4096) * 0.017) / o.fidget);
+        if (beat !== a.beat) {
+          const r = mixHash((a.h ^ Math.imul(beat, 0x85ebca6b)) >>> 0);
+          if (a.beat !== null && (r >>> 29) === 0) fireGesture(a, FIDGET[(r >>> 25) & 3], false);
+          a.beat = beat;
+        }
+      }
 
       if (a.lod === 'full') {
         const key = CLIP_FOR[p.state] || 'idle';
@@ -952,6 +1298,15 @@ export function createCharacters(opts = {}) {
         if (a.fastT > 0) {
           a.fastT -= dt;
           if (a.desk) a.desk.setEffectiveTimeScale(a.fastT > 0 ? 2.4 : 1);
+        }
+        /* Expression follows the state: brows down at a desk or a cabinet, up and a
+           mouth open in a meeting, neutral otherwise. A geometry swap, not a rebuild. */
+        if (a.face) {
+          const want = exprOf(p.state);
+          if (want !== a.expr) {
+            const g = faceGeometry(a.rigKey, want);
+            if (g) { a.face.geometry = g; a.expr = want; }
+          }
         }
         if (a.hue !== p.hue || a.idle !== isIdle || a.back !== back) {
           paint(a, p, isIdle, back);
@@ -969,9 +1324,25 @@ export function createCharacters(opts = {}) {
           : Math.sin(p.bob) * 0.018;
         const lift = ff ? 0 : bob;
         const pal = palOf(a, p, isIdle);
-        putPart(legs, i, pal.trouser, ox, oz, a, pose.legY, pose.legS, lift, pitch, back);
+        /* Same build and same palette the rig would use, so nothing about a person
+           changes when they cross the LOD line: bare legs under a skirt exactly where
+           the rig hides its trouser range, the hem band over the same span, a dress in
+           the top's tone, and hair as a second head sphere set back over the crown —
+           which at 26.5 degrees of elevation is most of what a head is. */
+        const b = a.build;
+        const vol = HAIR_VOL[b.hair] || 1;
+        putPart(legs, nLeg++, b.skirt ? pal.skin : pal.trouser, ox, oz, a,
+          pose.legY, pose.legS, lift, pitch, back);
+        if (b.skirt) {
+          putPart(legs, nLeg++, b.dress ? pal.shirt : pal.trouser, ox, oz, a,
+            pose.hemY, pose.hemS, lift, pitch, back, 1.45, true);
+        }
         putPart(bodies, i, pal.shirt, ox, oz, a, pose.torsoY, pose.torsoS, lift, pitch, back);
-        putPart(heads, i, pal.skin, ox, oz, a, pose.headY, 1, lift, pitch, back);
+        putPart(heads, nHead++, pal.skin, ox, oz, a, pose.headY, 1, lift, pitch, back);
+        if (o.hair && vol >= 1.05) {
+          putPart(heads, nHead++, pal.hair, ox - fwd[0] * 0.022, oz - fwd[1] * 0.022, a,
+            pose.headY + 0.022, vol, lift, pitch, back, vol);
+        }
       }
 
       scratch.position.set(ox, 0.02, oz);
@@ -981,7 +1352,9 @@ export function createCharacters(opts = {}) {
       blobs.setMatrixAt(nAll++, scratch.matrix);
     }
 
-    bodies.count = legs.count = heads.count = nCheap;
+    bodies.count = nCheap;
+    legs.count = nLeg;
+    heads.count = nHead;
     blobs.count = nAll;
     for (const m of [bodies, legs, heads, blobs]) {
       m.instanceMatrix.needsUpdate = true;
@@ -1005,16 +1378,31 @@ export function createCharacters(opts = {}) {
     bodies = legs = heads = blobs = null; cap = 0;
     for (const g of [geoBody, geoLegs, geoHead, geoBlob]) g.dispose();
     matCheap.dispose(); matBlob.dispose();
+    matHair.dispose(); matCloth.dispose(); matFace.dispose(); matHidden.dispose();
     for (const m of tints.values()) m.dispose();
     tints.clear();
-    if (template) {
-      template.traverse(c => {
-        if (!c.isMesh) return;
-        c.geometry.dispose();
-        for (const m of [].concat(c.material)) if (m) m.dispose();
-      });
+    // hair and outfit geometry are shared by every person wearing them, so they are
+    // freed here and never in downgrade()
+    for (const g of hairGeo.values()) if (g) g.dispose();          // clones and merges
+    for (const out of outfits.values()) if (out) out.geometry.dispose();
+    hairGeo.clear(); outfits.clear();
+    /* Only what we loaded. load(pre) hands over a scene the caller parsed and may still
+       be drawing — disposing it left them with a black rig on the next toggle. */
+    if (owned) {
+      for (const k in hairSrc) hairSrc[k].dispose();
+      for (const t of [templates.rig, templates.rigFemale]) {
+        if (!t) continue;
+        t.traverse(c => {
+          if (!c.isMesh) return;
+          c.geometry.dispose();
+          for (const m of [].concat(c.material)) if (m) m.dispose();
+        });
+      }
     }
-    template = null; clips = {};
+    for (const k in hairSrc) delete hairSrc[k];
+    hairFit = null; owned = false;
+    template = templates.rig = templates.rigFemale = null;
+    Garm = null; clips = {};
     group.clear();
     info.mode = 'primitive';
   }
@@ -1080,10 +1468,50 @@ export function selfTest() {
   ok(regionOfBone('Head') === R_SKIN && regionOfBone('hand_r') === R_SKIN,
     'head and hands are skin');
   ok(regionOfBone('thigh_l') === R_TROUSER && regionOfBone('pelvis') === R_TROUSER,
-    'hips and legs are trousers');
+    'hips and thighs are trousers');
   ok(regionOfBone('upperarm_l') === R_SHIRT && regionOfBone('spine_02') === R_SHIRT,
     'arms and spine are shirt');
-  ok(regionOfBone('ball_leaf_r') === R_TROUSER, 'a leaf bone follows its chain');
+  /* The forearm has to be SHIRT, not skin: the sleeve of garments.js's topLong reaches
+     wristX - 0.02, so it is what R_SHIRT being droppable depends on. */
+  ok(regionOfBone('lowerarm_l') === R_SHIRT, 'the forearm is under a long sleeve');
+  ok(regionOfBone('ball_leaf_r') === R_SHIN, 'a leaf bone follows its chain');
+  /* Shins are their OWN range, because no garment covers them: trousers stop at
+     ankleY + 0.03 and a skirt at the knee. Fold them back into R_TROUSER and a
+     hidden trouser range takes a bare leg with it. */
+  ok(regionOfBone('calf_l') === R_SHIN && regionOfBone('foot_r') === R_SHIN,
+    'calves and feet are the shin range');
+  ok(new Set([R_SKIN, R_SHIRT, R_TROUSER, R_SHIN]).size === R_N, 'the regions are distinct');
+
+  /* Who wears what. Every choice is a slice of p.h, so this is the whole floor's
+     wardrobe in one loop — and the one thing that must hold is that it VARIES. */
+  const F = { female: 0, hair: new Set(), beard: 0, skirt: 0, dress: 0, outfit: new Set() };
+  for (let i = 0; i < 600; i++) {
+    const bd = buildOf(Math.imul(i + 1, 2246822519) >>> 0, false, O);
+    if (bd.female) F.female++;
+    if (bd.beard) F.beard++;
+    if (bd.skirt) F.skirt++;
+    if (bd.dress) F.dress++;
+    F.hair.add(bd.hair);
+    F.outfit.add(bd.outfit.join('+') + (bd.dress ? '/one tone' : ''));
+    ok(!bd.beard || !bd.female, 'a beard was dealt to a woman');
+    ok(bd.skirt === (bd.dress || bd.outfit.includes('skirt')), 'build.skirt disagrees with the outfit');
+    ok(bd.outfit.length >= 2, 'an outfit of ' + bd.outfit.length + ' garment leaves skin showing');
+    ok((bd.female ? HAIR_F : HAIR_M).includes(bd.hair),
+      bd.hair + ' is not a style ' + (bd.female ? 'she' : 'he') + ' can be dealt');
+  }
+  ok(F.female > 240 && F.female < 360, F.female + '/600 women — "boy and girl" needs both halves');
+  ok(F.hair.size === 5, 'only ' + [...F.hair].join('/') + ' ever reaches the floor');
+  ok(F.beard > 30, 'only ' + F.beard + ' beards in 600 people');
+  ok(F.skirt > 60 && F.dress > 30,
+    F.skirt + ' skirts and ' + F.dress + ' dresses in 600 — the user asked for both by name');
+  ok(F.outfit.size === 3, 'outfits: ' + [...F.outfit].join(', '));
+  ok(JSON.stringify(buildOf(7, false, O)) === JSON.stringify(buildOf(7, false, O)),
+    'the wardrobe must be a pure function of p.h too');
+  const bossFit = new Set();
+  for (let i = 0; i < 200; i++)
+    bossFit.add(buildOf(Math.imul(i + 1, 2246822519) >>> 0, true, O).outfit.join('+'));
+  ok(bossFit.size === 1 && [...bossFit][0] === 'topLong+trousers+jacket',
+    'the boss must always wear the jacket: ' + [...bossFit].join(' / '));
 
   /* sitFwd's window. Body extents measured off the skinned seated rig; the rest are
      props.js's chair and desk and step()'s shove, i.e. other people's files — so this

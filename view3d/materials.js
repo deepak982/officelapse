@@ -193,13 +193,21 @@ export function amColor(kind) {
    same one; the chroma comes down, and trousers and skin come off p.h instead, so two
    people on one department hue still differ. Both ladders are short on purpose. */
 const SKIN = ['#e9c6a0', '#dcab7c', '#c8916a', '#ab7551', '#8b5c3e', '#6d4731'];
-const TROUSER = ['#2e3440', '#2a3350', '#3a3128', '#38404d', '#332f3b'];
-/* Four steps, so a desk row is not one value. Held inside .44-.59: X8 pins a
+/* Real trouser and skirt fabric: worsted navy, charcoal, slate, olive-brown, warm
+   grey. Low chroma and all under 25% lightness, which is what separates cloth from
+   the plastic of a chair — the department hue never reaches down here. */
+const TROUSER = ['#2e3440', '#2a3350', '#3a3128', '#38404d', '#332f3b',
+                 '#40434a', '#2b3538'];
+/* Six steps, so a desk row is not one value. Held inside .44-.59: X8 pins a
    character's albedo to office.js's shade(hue, 60, 50), i.e. 50% +/- 12. */
-const SHIRT_L = [.44, .49, .54, .59];
+const SHIRT_L = [.44, .47, .50, .53, .56, .59];
 const SHIRT_S = .34, SHIRT_S_IDLE = .12;
-// the boss's jacket: the department hue, twice the chroma, half the lightness
+// a jacket: the department hue, twice the chroma, half the lightness. The boss wears
+// it as his whole outfit; it is the only garment tone outside the shirt ladder.
 const JACKET = { s: .46, l: .31, sIdle: .20, lIdle: .26, trouser: '#22262f' };
+/* Hair. Not a hue ramp: black, dark and mid brown, auburn, dark blond, grey — the
+   distribution a real floor has. Dark enough that a crown reads against the carpet. */
+const HAIR = ['#17130f', '#241a13', '#3a281a', '#523620', '#7d6a4a', '#8d8880'];
 // the mannequin's ball joints, one dark tone rather than a fourth outfit region
 const JOINT = '#2b2f3a';
 
@@ -208,25 +216,33 @@ const JOINT = '#2b2f3a';
 const MIX = 2654435761;
 export const mixHash = h => Math.imul(h >>> 0, MIX) >>> 0;
 
-// cached: one entry per person per idle state, a few hundred Colors at most
+/* cached: one entry per person per idle state, a few hundred Colors at most. Keyed on
+   the WHOLE mix, not 18 bits of it: every entry below is a slice of m, so two people
+   agreeing on a truncated key would wear each other's hair. */
 const palCache = new Map();
 export function personPalette(hue, h, idle, boss) {
   const m = mixHash(h);
-  const key = (hue | 0) + ':' + (m % 262144) + (idle ? 'i' : '') + (boss ? 'b' : '');
+  const key = (hue | 0) + ':' + m + (idle ? 'i' : '') + (boss ? 'b' : '');
   let pal = palCache.get(key);
   if (!pal) {
+    const jacket = new THREE.Color().setHSL(hue / 360, idle ? JACKET.sIdle : JACKET.s,
+      idle ? JACKET.lIdle : JACKET.l, THREE.SRGBColorSpace);
     const shirt = new THREE.Color();
-    if (boss) {
-      shirt.setHSL(hue / 360, idle ? JACKET.sIdle : JACKET.s,
-        idle ? JACKET.lIdle : JACKET.l, THREE.SRGBColorSpace);
-    } else {
+    if (boss) shirt.copy(jacket);
+    else {
       // -.04 and no more: X8's +/-.12 window round 50% is the floor
       shirt.setHSL(hue / 360, idle ? SHIRT_S_IDLE : SHIRT_S,
         SHIRT_L[(m >>> 3) % SHIRT_L.length] - (idle ? .04 : 0), THREE.SRGBColorSpace);
     }
-    pal = { shirt, trouser: c(boss ? JACKET.trouser : TROUSER[(m >>> 8) % TROUSER.length]),
-            skin: c(SKIN[(m >>> 13) % SKIN.length]), joint: c(JOINT) };
-    if (idle) for (const k of ['trouser', 'skin', 'joint']) pal[k].multiplyScalar(.8);
+    pal = { shirt, jacket,
+            trouser: c(boss ? JACKET.trouser : TROUSER[(m >>> 8) % TROUSER.length]),
+            skin: c(SKIN[(m >>> 13) % SKIN.length]),
+            hair: c(HAIR[(m >>> 20) % HAIR.length]), joint: c(JOINT) };
+    /* Brows and lashes are the person's own hair, darker — which is why a blond has
+       brown brows and not blond ones. Never pure black: at six pixels a black quad on a
+       lit head reads as a hole punched through it rather than as an eye. */
+    pal.face = pal.hair.clone().multiplyScalar(.5);
+    if (idle) for (const k of ['trouser', 'skin', 'hair', 'face', 'joint']) pal[k].multiplyScalar(.8);
     palCache.set(key, pal);
   }
   return pal;

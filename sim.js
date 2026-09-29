@@ -87,6 +87,7 @@ const St = {
   cam: { x: 0, y: 0, z: .5, tx: 0, ty: 0, tz: .5 },
   focus: null, q: '', dpr: 1, userMoved: false, ff: false, wall: 0, health: null,
   catchUp: true,   // draining a backlog (reload / scrub): place people, don't animate
+  beat: -1,        // last small-talk beat emitted; a rebuild resets it (see chatter)
 };
 
 /* ---------------------------------------------------------------- data --- */
@@ -346,6 +347,7 @@ function rebuild(to) {
   for (const k in F.state.rooms) delete F.state.rooms[k].lastT;
   for (const e of St.events) e.done = e.t <= to - GONE;
   rewind();
+  St.beat = -1;           // the replay re-says its conversations from the top
   St.catchUp = true;      // the backlog about to replay must not be walked out
 }
 
@@ -449,6 +451,115 @@ function exit(p) {
   delete St.people[p.key];
 }
 
+/* ----------------------------------------------------------- small talk --- */
+/* Every other line this sim reports is real: a tool call, a prompt. These are
+   invented, so they go out flagged 'chat' and the view keeps them out of the room
+   log. Who speaks, to whom, which line and when are pure functions of the pair's
+   hashes and the sim clock, so scrubbing back replays a conversation verbatim. */
+const BEAT = 6;                 // sim seconds per line, so a 45s break holds one exchange
+const NEAR = 3.2;               // tiles apart and still talking: across a table counts
+const SOLO_ODDS = 11;           // one beat in eleven for someone with nobody to talk to
+const NO_TALK = { washrooms: 1, serverroom: 1, phonebooths: 1 };
+
+const TALK = [
+  ['the coffee machine wants descaling again', 'third time this week', 'I pressed later', 'we all press later'],
+  ['did anyone book this room', 'there is no booking system', 'so yes'],
+  ['I have been staring at one file for ten minutes', 'big file?', 'eleven lines'],
+  ['someone left a mug in the sink', 'that mug has been there since Tuesday', 'it has a name now'],
+  ['standup was six minutes', 'a record', 'nobody had anything to say', 'that is the trick'],
+  ['the printer is out of paper', 'the printer is always out of paper', 'I respect the consistency'],
+  ['I think that plant is fake', 'it is', 'it looked tired though'],
+  ['what is the wifi password', 'on the wall', 'behind the poster', 'naturally'],
+  ['I renamed the variable', 'to what', 'thing2', 'ship it'],
+  ['my ticket says make it pop', 'make what pop', 'that is the entire ticket'],
+  ['are we still doing the offsite', 'we were never doing the offsite', 'good'],
+  ['the vending machine took my coin', 'it does that', 'there is a spreadsheet for it'],
+];
+const SOLO = [
+  'the cooler is making that noise again',
+  'five more minutes',
+  'I will read that email properly later',
+  'nice plant',
+  'this chair has a setting I have never found',
+  'I will remember what I came in here for',
+  'the kettle and I are both warming up',
+  'whoever labelled the fridge shelves, thank you',
+];
+
+const mix = n => Math.imul(n, KNUTH) >>> 0;
+const faceTo = (p, q) => {
+  const dx = q.x - p.x, dy = q.y - p.y;
+  p.face = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? E : W) : (dy > 0 ? S : N);
+};
+
+/* Everyone idle, grouped by where: `p.fac || p.room` because the room's own cooler
+   is as much a venue as the cafeteria. A washroom run is not a social call. */
+function idleVenues() {
+  const g = new Map();
+  for (const k of Object.keys(St.people).sort()) {   // key order, so pairing replays
+    const p = St.people[k];
+    if (p.state !== 'think' || (p.fac && NO_TALK[p.fac.kind])) continue;
+    const v = p.fac || p.room;
+    let a = g.get(v); if (!a) g.set(v, a = []);
+    a.push(p);
+  }
+  return g;
+}
+
+/* `[a, partner, nearest]` per idle person, walked in key order so the pairing
+   replays. `partner` is the nearest one not already talking to someone else and is
+   null for the odd one out; `nearest` is who they turn toward either way, so a third
+   person at the table looks like they are listening instead of facing the wall.
+   ponytail: O(n^2) per venue, and a venue is at most 20 seats. */
+function chatPairs() {
+  const out = [];
+  for (const [, list] of idleVenues()) {
+    const taken = new Set();
+    for (const a of list) {
+      if (taken.has(a.key)) continue;
+      let best = null, near = null, bd = NEAR * NEAR, nd = NEAR * NEAR;
+      for (const b of list) {
+        if (b === a) continue;
+        const d = (b.x - a.x) ** 2 + (b.y - a.y) ** 2;
+        if (d < nd) { nd = d; near = b; }
+        if (!taken.has(b.key) && d < bd) { bd = d; best = b; }
+      }
+      if (best) { taken.add(a.key); taken.add(best.key); }
+      out.push([a, best, near]);
+    }
+  }
+  return out;
+}
+
+/* One line per pair per beat and a turn each, so the reply lands after the opener
+   instead of on top of it. The exchange is clocked off when the pair's break began
+   (`breakAt`, itself a sim-clock stamp) plus a hash stagger, so it opens on line 0
+   and the whole floor does not speak in unison. */
+function chatter() {
+  if (St.ff) return;                              // too fast to read, as with bubbles
+  const beat = Math.floor(St.clock / BEAT);
+  if (beat === St.beat) return;
+  St.beat = beat;
+  for (const [a, b, near] of chatPairs()) {
+    if (b || near) faceTo(a, b || near);          // no more rows of people staring north
+    if (!b) {
+      const h = mix(a.h);
+      if ((h + beat) % SOLO_ODDS === 0) hooks.say(a, SOLO[(h >>> 7) % SOLO.length], 'chat', St.clock);
+      continue;
+    }
+    faceTo(b, a);
+    // mix(b.h) first: sibling keys ('s1|a0'..'s1|a9') differ by one character, so a
+    // bare XOR is ~1 for every pair in the room and two tables ran the same script.
+    const h = mix(a.h ^ mix(b.h));
+    const script = TALK[h % TALK.length];
+    // an independent slice for the stagger, so two pairs that draw the same script
+    // do not also open on the same beat
+    const start = Math.max(a.breakAt, b.breakAt) + ((h >>> 5) % 4) * BEAT;
+    const i = beat - Math.floor(start / BEAT);
+    if (i >= 0 && i < script.length) hooks.say(i % 2 ? b : a, script[i], 'chat', St.clock);
+  }
+}
+
 /* --------------------------------------------------------------- clock --- */
 /* One tick of the world: move the clock, apply whatever came due, step everyone.
    Returns how many events were applied, which is what tells the caller whether a
@@ -476,13 +587,14 @@ function advance(dt) {
   if (St.catchUp && applied <= 1) St.catchUp = false;
 
   step(dt);
+  chatter();          // after step: pairing reads where everyone ended up
   return applied;
 }
 
 const Sim = {
   St, hooks, SPEEDS, IDLE, LONG_IDLE, GONE, FF_ABOVE, BREAK_OVER,
   poll, relabel, advance, step, apply, rebuild, rewind, personFor, exit,
-  roomHit, roomText, personText,
+  roomHit, roomText, personText, chatter, chatPairs, BEAT, NEAR, TALK, SOLO,
   roomName, personName, taskLabel, shortLabel, clean, deptHue, hash, pkey,
 };
 

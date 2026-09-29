@@ -19,8 +19,20 @@ const C = {
 const esc = s => String(s).replace(/[<>&"]/g, c =>
   ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
 
+/* A third bubble style, injected here rather than in index.html so the whole
+   ambient-chatter rule lives in one file: invented lines must never read like a
+   real tool label, so they get their own colour and italics. */
+const CSS = `.bub.chat{background:#c6d0e4;color:#2b3244;font-style:italic;
+    box-shadow:0 4px 12px #0009}
+  .bub.chat::after{border-top-color:#c6d0e4}
+  .bub.chat i{color:#59637d;font-style:normal}`;
+
 function init(layerEl, logEl, jumpEl) {
   C.layer = layerEl; C.log = logEl; C.jump = jumpEl;
+  if (document.head) {          // a headless harness has a layer but no <head>
+    const st = document.createElement('style'); st.textContent = CSS;
+    document.head.appendChild(st);
+  }
   C.log.addEventListener('scroll', () => {
     const nearBottom = C.log.scrollHeight - C.log.scrollTop - C.log.clientHeight < 40;
     C.follow = nearBottom;
@@ -32,10 +44,15 @@ function init(layerEl, logEl, jumpEl) {
   });
 }
 
-/* a person said something */
-function say(p, text, isTask, wallNow, simNow, showBubble) {
+/* A person said something. `kind` is true for a prompt, false for a tool label,
+   and the string 'chat' for invented small talk. */
+function say(p, text, kind, wallNow, simNow, showBubble) {
   if (!text) return;
-  logLine(p, text, isTask, simNow);
+  /* Small talk gets a bubble but never a log line. The log is the session's
+     record and these lines did not happen: styling alone would not survive a
+     screenshot or a copy-paste, and the band is shared, so half a cross-session
+     conversation would land in a room whose log the other speaker is not in. */
+  if (kind !== 'chat') logLine(p, text, kind, simNow);
   if (!showBubble) return;
   let b = C.bubbles.get(p.key);
   if (!b) {
@@ -53,11 +70,12 @@ function say(p, text, isTask, wallNow, simNow, showBubble) {
     b.text = text;
     b.el.classList.remove('in'); void b.el.offsetWidth; b.el.classList.add('in');
   }
-  b.el.classList.toggle('task', !!isTask);
+  b.el.classList.toggle('task', kind === true);
+  b.el.classList.toggle('chat', kind === 'chat');
   b.until = wallNow + DWELL;
 }
 
-/* the log records everything, including while bubbles are suppressed */
+/* the log records every real line, including while bubbles are suppressed */
 function logLine(p, text, isTask, simNow) {
   const L = logFor(p.room.sid);
   const last = L.msgs[L.msgs.length - 1];

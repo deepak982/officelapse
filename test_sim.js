@@ -27,6 +27,7 @@ function fresh() {
     sessions: {}, agentMeta: {}, events: [], people: {},
     t0: 0, t1: 1e12, clock: 0, live: false, playing: true, si: 0,
     scanFrom: 0, since: 0, q: '', ff: false, catchUp: false, focus: null, wall: 0,
+    beat: -1,
   });
   Sim.hooks.say = () => {};
   Sim.hooks.reset = () => {};
@@ -64,6 +65,36 @@ const atFacility = () => Object.values(St.people).filter(p => p.fac);
 /* rate 60 is above FF_ABOVE, so goTo places people instead of walking them:
    the tests care where a trip ends, not about the 25 seconds in the corridor */
 const placeInstantly = () => { St.si = 2; };
+
+/* Seat everyone in the shared band, then drop to exactly FF_ABOVE. The trips need
+   60x to place instead of walk, but small talk is suppressed while St.ff is on, so
+   the two phases cannot run at one speed. */
+function seatEveryone() {
+  placeInstantly();
+  runTo(150);
+  runTo(100 + Sim.IDLE + 2);          // past IDLE: the break trip fires
+  St.si = 1;                          // SPEEDS[1] is 10, and ff is `rate > 10`
+}
+function idleFloor(n = 10) {
+  fresh();
+  session('s1', 'alpha', 'Invoice PDF rewrite');
+  St.events = Array.from({ length: n }, (_, i) => ev(100, 's1', 'a' + i));
+  seatEveryone();
+}
+/* every ambient line said over a window, as strings, so two replays can be compared */
+function chatOver(from, to) {
+  const out = [];
+  Sim.hooks.say = (p, text, kind, simNow) => {
+    if (kind === 'chat') out.push(Math.round(simNow) + ' ' + p.key + ' ' + text);
+  };
+  for (let t = from; t <= to; t += 2) runTo(t);
+  Sim.hooks.say = () => {};
+  return out;
+}
+const faceAt = (p, q) => {
+  const dx = q.x - p.x, dy = q.y - p.y;
+  return Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? Floor.E : Floor.W) : (dy > 0 ? Floor.S : Floor.N);
+};
 
 /* --------------------------------------------------------------- tests --- */
 
@@ -594,6 +625,100 @@ check('S20', 'people walk at a walking speed, and the boss walks slower than any
   assert(fast.phase > boss.phase * 1.15,
     `phase advanced ${fast.phase.toFixed(2)} for the fastest walker and ` +
     `${boss.phase.toFixed(2)} for the boss — p.phase is back on a fixed rate`);
+});
+
+check('S21', 'idle people pair off close together and turn to face each other', () => {
+  idleFloor(10);
+  St.beat = -1; runTo(195);                    // one beat pass, so the facing is applied
+
+  const pairs = Sim.chatPairs().filter(([, b]) => b);
+  assert(pairs.length >= 2, 'nobody paired up: ' + pairs.length + ' pairs on a full break');
+  for (const [a, b] of pairs) {
+    assert.strictEqual(a.state, 'think', a.key + ' is ' + a.state + ', not on a break');
+    assert.strictEqual(b.state, 'think', b.key + ' is ' + b.state + ', not on a break');
+    assert.strictEqual(a.fac || a.room, b.fac || b.room,
+      a.key + ' and ' + b.key + ' are talking across two different venues');
+    const d = Math.hypot(b.x - a.x, b.y - a.y);
+    assert(d <= Sim.NEAR, a.key + ' and ' + b.key + ' are ' + d.toFixed(2) + ' tiles apart');
+    assert.strictEqual(a.face, faceAt(a, b), a.key + ' is not looking at ' + b.key);
+    assert.strictEqual(b.face, faceAt(b, a), b.key + ' is not looking at ' + a.key);
+    assert.notStrictEqual(a.face, b.face, a.key + ' and ' + b.key + ' face the same way');
+  }
+  // the whole point of the change: not one row of people all staring north
+  const facing = Object.values(St.people).filter(p => p.state === 'think' && p.face !== Floor.N);
+  assert(facing.length >= 4, 'only ' + facing.length + ' idle people turned away from north');
+});
+
+check('S22', 'a conversation replays word for word after a rebuild', () => {
+  idleFloor(10);
+  const first = chatOver(193, 232);
+  assert(first.length > 6, 'barely anyone spoke over a 40s break: ' + JSON.stringify(first));
+  // and it is a conversation, not a chorus: somebody replied on a later beat
+  const byKey = {};
+  for (const line of first) { const k = line.split(' ')[1]; byKey[k] = (byKey[k] || 0) + 1; }
+  assert(Object.values(byKey).some(n => n >= 2), 'nobody said more than one line: ' + JSON.stringify(byKey));
+
+  Sim.rebuild(150); seatEveryone();
+  assert.deepStrictEqual(chatOver(193, 232), first, 'the conversation changed on replay');
+  Sim.rebuild(150); seatEveryone();
+  assert.deepStrictEqual(chatOver(193, 232), first, 'the conversation drifted by the third pass');
+});
+
+check('S23', 'invented chatter is flagged and never reaches the room log', () => {
+  const Chat = require('./chat.js');
+  const p = { key: 's1|a1', boss: false, aid: 'a1', display: 'Priya', name: 'n',
+              hue: 200, room: { sid: 'log-test' } };
+  Chat.say(p, 'running pytest', false, 0, 100, false);
+  Chat.say(p, 'the printer is out of paper', 'chat', 0, 101, false);
+  Chat.say(p, '“fix the retry”', true, 0, 102, false);
+  assert.deepStrictEqual(Chat.logFor('log-test').msgs.map(m => m.text),
+    ['running pytest', '“fix the retry”'],
+    'an invented line got into the session record');
+
+  // and the sim only ever hands the view scripted lines under that flag
+  const SCRIPTED = new Set([].concat(...Sim.TALK).concat(Sim.SOLO));
+  idleFloor(10);
+  const said = [];
+  Sim.hooks.say = (q, text, kind) => said.push([kind, text]);
+  for (let t = 193; t <= 232; t += 2) runTo(t);
+  Sim.hooks.say = () => {};
+  const chat = said.filter(([k]) => k === 'chat');
+  assert(chat.length, 'no ambient lines to check');
+  for (const [, text] of chat) assert(SCRIPTED.has(text), 'unscripted ambient line: ' + text);
+  for (const [k, text] of said)
+    assert(k === 'chat' || typeof k === 'boolean', 'real line ' + text + ' flagged ' + k);
+});
+
+check('S24', 'nobody chats while walking, above 10x, or once they have clocked out', () => {
+  idleFloor(10);
+  const bad = [];
+  Sim.hooks.say = (p, text, kind) => {
+    if (kind !== 'chat') return;
+    if (!St.people[p.key] || p.state !== 'think') bad.push(p.key + ' spoke while ' + p.state);
+  };
+  for (let t = 193; t <= 232; t += 2) runTo(t);
+  Sim.hooks.say = () => {};
+  assert.deepStrictEqual(bad, [], bad.join('; '));
+
+  // the break ends BREAK_OVER after it started and everyone walks back. A 1/60 frame
+  // at 10x covers 0.02 tiles, so they are still in the corridor for the whole window:
+  // genuinely walking, which is the case that has to stay silent.
+  const onFoot = chatOver(240, 300);
+  const walking = Object.values(St.people).filter(p => p.state === 'walk').length;
+  assert(walking >= 5, 'only ' + walking + ' people are walking back, so this pins nothing');
+  assert.deepStrictEqual(onFoot, [], 'people talked on the way back to their desks');
+
+  idleFloor(10);
+  placeInstantly();                                  // 60x: St.ff, so bubbles are off too
+  assert.deepStrictEqual(chatOver(193, 232), [], 'chatter fired above 10x replay');
+
+  idleFloor(10);
+  placeInstantly();
+  runTo(100 + Sim.GONE + 2, 40);
+  assert.strictEqual(Object.keys(St.people).length, 0, 'nobody clocked out');
+  St.si = 1;
+  assert.deepStrictEqual(chatOver(100 + Sim.GONE + 4, 100 + Sim.GONE + 40), [],
+    'an empty floor still had a conversation');
 });
 
 /* ---------------------------------------------------------------- done --- */
