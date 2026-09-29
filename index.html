@@ -29,19 +29,15 @@
 
   #stage{position:relative;flex:1;overflow:hidden}
   canvas{width:100%;height:100%;display:block}
-  /* The 3D view is THE view. The 2D canvas stays in the document underneath it,
-     unhidden, so office.js keeps measuring a real element — it is the fallback if
-     WebGL will not start, and nothing but a stale invisible frame otherwise.
-     Bubbles are positioned by the 2D camera, so they stay down in 3D. */
+  /* #cv is the WebGL-failure fallback, kept in the document so office.js keeps
+     measuring a real element. */
   #cv3{position:absolute;inset:0;display:none;z-index:1}
   #stage.three #cv3{display:block}
-  /* visibility, not display: office.js still measures a real element, so the
-     fallback is a live canvas the instant the class comes off. An uninitialised
-     #cv3 is transparent, so during the three.js download you see the page
-     background — the same colour the 3D scene clears to, hence no flash. */
+  /* visibility, not display: keeps its layout, so the fallback is live the instant
+     the class comes off. #cv3 is transparent until init, and the page background is
+     the colour the scene clears to — hence no flash on load. */
   #stage.three #cv{visibility:hidden}
-  /* z-index 2, above #cv3: without it the opaque 3D canvas paints over both, and a
-     machine with no Claude sessions gets a black rectangle and no explanation. */
+  /* above #cv3, or a machine with no sessions gets a black rectangle and no text */
   .empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--dim);
     pointer-events:none;text-align:center;padding:0 12%;line-height:1.7;max-width:100%;
     z-index:2}
@@ -182,16 +178,13 @@
      vendored addons' bare specifiers to relative paths, so no import map is needed.
      Loaded lazily on the first toggle: nobody pays 1.4MB of three.js to watch in 2D. -->
 <script type="module">
-  /* The 3D view is the only view. There is no toggle: the 2D canvas underneath is
-     a fallback for a machine that cannot give us WebGL, not a user-facing choice. */
+  /* No toggle: 3D is the view, 2D is the WebGL-failure fallback. */
   const stage = document.getElementById('stage');
   let View3D = null, chars = null, prev = 0;
 
   async function start() {
-    // Claimed BEFORE the 1.4MB of three.js is fetched, not after. Added late, the
-    // 2D renderer gets a second of frames on screen first and the page visibly
-    // flips from one view to the other on every reload. office.js reads this class
-    // to decide whether to draw at all, so this also stops it doing the work.
+    // before the three.js fetch, not after — added late, 2D gets a second of
+    // frames on screen and the page visibly flips views on every reload
     stage.classList.add('three');
     View3D = await import('./view3d/scene.js');
     window.View3D = View3D;                     // debugging seam; the 2D view has one too
@@ -212,11 +205,8 @@
       console.error('view3d: characters unavailable, floor only —', e);
     }
 
-    /* Speech bubbles are DOM over the canvas and belong to whichever view is up.
-       chat.js takes the projector as an argument for exactly this reason, so the
-       3D view supplies one built from its own camera and nothing in chat.js
-       changes. Aimed at 1.95 units — just over head height — so a bubble sits
-       above its speaker rather than over their feet. */
+    /* chat.js takes its projector as an argument, so the 3D camera can drive the
+       bubbles unchanged. 1.95 units = just over head height. */
     const THREE = await import('./vendor/three.module.js');
     const V = new THREE.Vector3();
     const project = (x, y) => {

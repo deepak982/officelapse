@@ -67,12 +67,56 @@ Animation clips — one `AnimationClip` per file, no mesh:
 | `clips/consume.glb` | `consume` | 82,988 | `1d994082` |
 | `clips/push_loop.glb` | `push_loop` | 90,788 | `f121fba8` |
 
-Total: **2,346,108 bytes (2.24 MB)** — inside the ~8 MB budget.
+Subtotal: **2,346,108 bytes (2.24 MB)**.
 
 Upstream base for every URL above: `https://actionforge.app/`. The `?v=` hashes are
 ActionForge's cache-busting versions, recorded so a re-fetch can be checked against
 what is committed here. The library snapshot these came from is
 `manifests/library.json`, `schemaVersion: 2`, `generatedAt: 2026-09-26T05:12:07.479Z`.
+
+## Second body and hairstyles
+
+| | |
+|---|---|
+| Author | **Quaternius** |
+| Licence | [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/) |
+| Author site | https://quaternius.com |
+| Packs | *Universal Animation Library 2* (female mannequin) and *Universal Base Characters* (hairstyles), both the free Standard editions |
+| Obtained from | https://github.com/NafisRayan/Animate-Rigged-Humanoid-No-Blender |
+| Retrieved | 2026-09-29 |
+
+Quaternius's own pages put these behind Google Drive and itch.io, neither of which can be
+fetched without a browser session; the repo above mirrors both packs verbatim, including
+each pack's own licence file. Both read `CC0 1.0 Universal (CC0 1.0) Public Domain
+Dedication`, `Models by @Quaternius` — quoted from
+`Universal Base Characters[Standard]/License_Standard.txt` and
+`Universal Animation Library 2[Standard]/License.txt`.
+
+| File | Bytes | Source file in the mirror |
+|---|---|---|
+| `rig-human-f.glb` | 1,442,824 | `Universal Animation Library 2[Standard]/…/Female Mannequin/Unreal-Godot/Mannequin_F.glb` |
+| `hair/hair-long.glb` | 92,412 | `…/Hairstyles/Rigged to Head Bone/glTF (Godot -Unreal)/Hair_Long.gltf` |
+| `hair/hair-buns.glb` | 104,788 | same directory, `Hair_Buns.gltf` |
+| `hair/hair-parted.glb` | 27,032 | same directory, `Hair_SimpleParted.gltf` |
+| `hair/hair-buzzed.glb` | 17,220 | same directory, `Hair_Buzzed.gltf` |
+| `hair/hair-buzzed-female.glb` | 17,244 | same directory, `Hair_BuzzedFemale.gltf` |
+| `hair/hair-beard.glb` | 21,564 | same directory, `Hair_Beard.gltf` |
+
+`rig-human-f.glb` is the mirror's file byte for byte. The six hair files were rebaked from
+their `.gltf` + `.bin` pairs into static GLBs in Head-bone local space: geometry and normals
+are Quaternius's unchanged, the 65-joint skin data and the texture references were dropped.
+
+Deliberately **not** taken from these packs:
+
+- **The textures** (`T_Hair_*`, `T_Superhero_*`) — 1.5–4.7 MB each, and unused, because
+  both mannequins are flat-shaded.
+- **`Superhero_Female_FullBody` / `Superhero_Male_FullBody`** — CC0 and on the same
+  skeleton, but they need those textures to read as intended.
+- **The mirror's FBX, Unity, `.blend` and animation-library directories** — not needed.
+- The paid **SOURCE** editions of both packs, offered on Quaternius's site. Nothing from
+  them is here; only the free Standard editions are, and only those are CC0.
+
+Total for `assets/`: **4,069,192 bytes (3.88 MB)** — inside the ~8 MB budget.
 
 ## Props
 

@@ -50,6 +50,117 @@
     "cloneNote": "import { clone } from './vendor/SkeletonUtils.js'. Never mesh.clone() \u2014 a plain clone shares one skeleton and every person animates identically.",
     "bboxWarning": "Box3.setFromObject() on this rig reports ~0.458, not 1.83 \u2014 it does not account for skinning here. Do not size the camera or a blob shadow from it; use the measured heights above."
   },
+  "rigFemale": {
+    "file": "assets/rig-human-f.glb",
+    "skinName": "Armature",
+    "skinnedMeshNames": [
+      "Mannequin",
+      "Mannequin_1"
+    ],
+    "skinnedMeshNote": "Two primitives again, but the names differ from the male rig's. Find them by traversing o.isSkinnedMesh, never by name.",
+    "skeletonId": "quaternius-human",
+    "boneCount": 65,
+    "boneNote": "The 6 bones the male rig has and this one lacks are exactly clipLoading.unanimatedBones, so no clip track goes unbound.",
+    "rootBone": "root",
+    "headBone": "Head",
+    "neckBone": "neck_01",
+    "handBones": {
+      "left": "hand_l",
+      "right": "hand_r"
+    },
+    "propSockets": [],
+    "propSocketNote": "No socket_offhand bones here. Hang props off hand_l / hand_r instead.",
+    "fingersRigged": true,
+    "heightUnits": {
+      "bindPose": 1.8082,
+      "posedIdle": 1.7511,
+      "posedWalk": 1.7806,
+      "posedSitting": 1.4087,
+      "note": "Measured with applyBoneTransform, same method as the male rig. ~1.3% shorter in every pose, which is free silhouette variety."
+    },
+    "feetAtY": 0.0,
+    "feetNote": "Feet sit on y=0 in every clip (worst case +0.003). Same drop-in at (p.x, 0, p.y) as the male rig.",
+    "scale": 1.0,
+    "cloneWith": "SkeletonUtils.clone",
+    "clipsVerified": "All 18 clips in this manifest bind with zero missing bones \u2014 every one of their 195 tracks targets a bone this rig has, and each clip moves 65 bones on a SkeletonUtils.clone.",
+    "bboxWarning": "Box3.setFromObject() reports ~0.446, not 1.81 \u2014 same skinning trap as the male rig. Use the measured heights."
+  },
+  "hair": {
+    "attachBone": "Head",
+    "note": "Static meshes already in Head-bone local space: parent to the rig's Head bone and they ride every clip. No skinning, no rebinding.",
+    "bakeNote": "The Quaternius source was skinned but 100% weighted to Head, so collapsing it to a static mesh lost nothing and dropped the 65-joint skin data.",
+    "material": "One plain PBR material per file, dark baseColor, doubleSided. Meant to be tinted per person.",
+    "fit": {
+      "note": "Apply to the mesh you parent to Head: scale is per-axis, position is in Head-local units. Pick the group by style, then the target rig.",
+      "female-source": {
+        "appliesTo": ["long", "buns", "buzzedFemale"],
+        "rig": {
+          "scale": [0.9758, 1.2162, 1.0315],
+          "position": [0, -0.0036, -0.0152]
+        },
+        "rigFemale": {
+          "scale": [0.9303, 1.104, 0.9668],
+          "position": [0, 0.0005, 0.0035]
+        }
+      },
+      "male-source": {
+        "appliesTo": ["parted", "buzzed", "beard"],
+        "rig": {
+          "scale": [0.9569, 1.1934, 1.0426],
+          "position": [0, 0.009, -0.0263]
+        },
+        "rigFemale": {
+          "scale": [0.9123, 1.0833, 0.9772],
+          "position": [0, 0.0119, -0.0068]
+        }
+      }
+    },
+    "fitNote": "These hairstyles were authored on Quaternius's Universal Base Characters, whose heads are wider and ~20% shorter in the cranium than either mannequin. The fit maps that skull onto the target's, per axis, anchored at the Head origin — that is why y scales up ~1.1-1.2 while x scales slightly down. Skip it and every style leaves a bare crown.",
+    "styles": {
+      "long": {
+        "file": "assets/hair/hair-long.glb",
+        "verts": 3080,
+        "tris": 2906,
+        "bytes": 92412,
+        "reads": "female"
+      },
+      "buns": {
+        "file": "assets/hair/hair-buns.glb",
+        "verts": 3501,
+        "tris": 3284,
+        "bytes": 104788,
+        "reads": "female"
+      },
+      "buzzedFemale": {
+        "file": "assets/hair/hair-buzzed-female.glb",
+        "verts": 466,
+        "tris": 830,
+        "bytes": 17244,
+        "reads": "female"
+      },
+      "parted": {
+        "file": "assets/hair/hair-parted.glb",
+        "verts": 757,
+        "tris": 1301,
+        "bytes": 27032,
+        "reads": "male"
+      },
+      "buzzed": {
+        "file": "assets/hair/hair-buzzed.glb",
+        "verts": 466,
+        "tris": 830,
+        "bytes": 17220,
+        "reads": "male"
+      },
+      "beard": {
+        "file": "assets/hair/hair-beard.glb",
+        "verts": 596,
+        "tris": 1034,
+        "bytes": 21564,
+        "reads": "male, wears over any hair"
+      }
+    }
+  },
   "clipLoading": {
     "pattern": "The rig GLB holds the mesh and has zero animations. Each clip GLB holds exactly one AnimationClip and zero meshes. Load the rig once, load each clip GLB once, take gltf.animations[0], and share that clip across all mixers.",
     "binding": "Verified: every animated track targets a bone name that exists on the rig, so clips bind to a cloned rig with no retargeting.",
@@ -260,7 +371,7 @@
   "standIn": {
     "note": "The performance budget caps full rigs at ~40. There is no separate low-poly stand-in model. Use a primitive for the rest \u2014 a capsule or a 2-quad billboard at scale 1.0 x 1.8287 so it reads at the same height as a real rig."
   },
-  "totalBytes": 2346108,
+  "totalBytes": 4069192,
   "licence": "CC0-1.0 for every file under assets/. See assets/CREDITS.md.",
   "poseHeights": {
     "comment": "Measured world-space bone heights, scale 1. Props must match these or people float and sink.",

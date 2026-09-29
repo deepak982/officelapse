@@ -22,6 +22,8 @@
      a bug; the smoothness is the whole point.
    - the walk clip is played at simSpeed / 0.975, because 0.975 u/s is the ground
      speed its baked root motion was authored at. Anything else skates.
+   - one rig for 135 people, so every difference between them is a bit slice of p.h
+     and never Math.random: buildOf, VARIANTS, personPalette, splitRegions.
 
    Every number about the rig comes from assets/manifest.json, which is measured,
    not guessed. The file is fetched at load() so a re-export cannot silently
@@ -36,6 +38,7 @@
 
 import * as THREE from '../vendor/three.module.js';
 import { clone as skeletonClone } from '../vendor/SkeletonUtils.js';
+import { personPalette, mixHash } from './materials.js';
 
 /* p.state -> clip key, straight out of the contract. `leaving` walks out. */
 export const CLIP_FOR = {
@@ -72,6 +75,8 @@ const ALIASES = {
    assumes the model faces +z; which way it really faces is measured at load and
    folded into options.yawOffset. */
 const FACE_YAW = [Math.PI, Math.PI / 2, 0, -Math.PI / 2];
+/* the same four facings as a unit [dx, dz], for the seated settle */
+const FACE_FWD = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 
 /* last-resort tell when a gesture has no clip and no synthesised layer (a rig
    that failed to load, or the cheap LOD): [seconds, rad/s, radians] of pitch. */
@@ -92,8 +97,32 @@ const DEFAULTS = {
   pitchSign: 1,       // flip if a lookup pitches the head down instead of up
   bossScale: 1.06,    // the 2D view draws the boss 1.1x; a rig needs less
   nodOnPrompt: true,  // a boss taking an instruction nods; prompt events carry no tool
-  variants: true,     // two walks and two idles, picked by p.h
+  variants: true,     // two walks and three standing idles, picked by p.h
+  /* x the measured 1.8287, so 1.62 m to 1.82 m. Tune by eye; width is the only
+     non-uniform axis and 3% is its ceiling — past that a skinned mesh reads squashed
+     rather than slim. */
+  height: [0.885, 0.995],
+  width: [0.97, 1.03],
+  /* Parked on its seat tile's centre the seated pose puts its lower back THROUGH the
+     chair's backrest and out the far side. 0.14 is a window, not a taste: it has to
+     clear the back of the cushion and still rest on its front face, without pushing a
+     foot into the desk. selfTest holds the window; do not nudge it by eye. */
+  sitFwd: 0.14,
 };
+
+/* Clip suffixes load() resolves; '' is the manifest's preferred default, so a rig
+   carrying only the defaults still works (setClip falls back). */
+const VARIANTS = { walk: ['', '2'], idle: ['', '2', '3'] };
+
+/* There is no clothing geometry, so shirt / trousers / skin comes out of the mesh
+   itself, split by the bone that skins each vertex hardest. See splitRegions. */
+const R_SKIN = 0, R_SHIRT = 1, R_TROUSER = 2;
+const SKIN_BONES = /^(Head|neck_01|hand_|index_|middle_|ring_|pinky_|thumb_)/;
+const LEG_BONES = /^(pelvis|thigh_|calf_|foot_|ball_)/;
+const regionOfBone = n =>
+  SKIN_BONES.test(n) ? R_SKIN : LEG_BONES.test(n) ? R_TROUSER : R_SHIRT;
+// M_Joints is ball joints, three quarters of it finger balls: one dark tone
+const JOINT_MAT = /joint/i;
 
 /* the rig's own bone names, from the manifest. Only these are ever touched. */
 const BONES = {
@@ -119,12 +148,31 @@ export function pickClip(clips, want) {
   return null;
 }
 
-/* walk playback so the feet match the floor: measured ground speed / reference.
-   The sim walks people at 2.0-2.39 tiles/s against a 0.975 u/s clip, so this
-   sits near 2.3x and the walk looks brisk. That is honest — the alternatives are
-   a slower p.speed in sim.js or switching to jog_fwd_loop (5.36 u/s), not a
-   fudged rate, which would put the slide back. */
+/* Measured ground speed / reference. NEVER fudge this ratio to fix a cadence — it is
+   the only thing stopping the skate, so the knob is p.speed in sim.js, which used to
+   play it at 2.45x. The clamp is an outlier guard for the shove, not an operating
+   point. */
 export const walkScale = (ground, ref) => clamp(ground / (ref || 1), 0.35, 2.6);
+
+/* Height and width off MIXED bits of p.h: hash() in sim.js is a plain *31 roll, so
+   sibling keys share every bit above ~8 and an unmixed slice hands a whole room one
+   body — the trap sim.js's own KNUTH multiply fixes. The boss is scaled on top. */
+export function buildOf(h, boss, o) {
+  const m = mixHash(h);
+  const [hLo, hHi] = o.height, [wLo, wHi] = o.width;
+  const hy = (hLo + ((m >>> 18) % 12) / 11 * (hHi - hLo)) * (boss ? o.bossScale : 1);
+  const wRel = wLo + ((m >>> 22) % 7) / 6 * (wHi - wLo) + (boss ? 0.02 : 0);
+  const pick = (key, at) => {
+    const opts = VARIANTS[key];
+    return opts[((m >>> at) >>> 0) % opts.length];
+  };
+  return {
+    hy, hw: hy * wRel,
+    // fixed for a boss, dealt for everyone else: arms folded is the cheapest way the
+    // rig can say who is in charge, and a rank that varies is not a rank
+    variant: { walk: boss ? '' : pick('walk', 26), idle: boss ? '2' : pick('idle', 28) },
+  };
+}
 
 /* Who gets a full rig: the focused room, plus anyone in the amenity band, capped.
    The band is under the camera at all times, so degrading someone in the
@@ -174,27 +222,39 @@ export function createCharacters(opts = {}) {
   };
   const warn = m => { info.notes.push(m); console.warn('[characters] ' + m); };
 
-  /* --- cheap LOD: three InstancedMeshes, no mixer, no per-person draw call ---
-     Proportioned from the manifest's measured heights: 1.8287 tall, ankle 0.103,
-     head 1.526. There is no low-poly CC0 stand-in, so this is a capsule. */
-  const geoBody = new THREE.CapsuleGeometry(0.19, 0.97, 3, 10);
-  const geoHead = new THREE.SphereGeometry(0.15, 10, 7);
+  /* --- cheap LOD: four InstancedMeshes, no mixer, no per-person draw call ---
+     95 of 135 people are these, so three parts, not one pill. Heights from the
+     manifest, scaled by the same build the rig uses. Legs are a cylinder and not a
+     second capsule because X8 finds the body by geometry type. */
+  const geoBody = new THREE.CapsuleGeometry(0.17, 0.34, 3, 10);
+  const geoLegs = new THREE.CylinderGeometry(0.155, 0.115, 0.80, 8);
+  const geoHead = new THREE.SphereGeometry(0.13, 10, 7);
   const geoBlob = new THREE.CircleGeometry(0.3, 14).rotateX(-Math.PI / 2);
+  /* Unscaled part centres. Seated drops onto the chair (seat top 0.44) and shortens
+     the legs, since a cylinder cannot show a thigh going forward. Neighbouring parts
+     OVERLAP a couple of centimetres: butted exactly, the bob opens a slit at the
+     waist and neck. */
+  const POSE = {
+    stand: { legY: 0.50, legS: 1, torsoY: 1.19, torsoS: 1, headY: 1.67 },
+    sit: { legY: 0.34, legS: 0.62, torsoY: 0.86, torsoS: 0.85, headY: 1.20 },
+  };
   const matCheap = new THREE.MeshLambertMaterial();
   // blob shadow, not a shadow map: 135 characters cannot afford real ones
   const matBlob = new THREE.MeshBasicMaterial({
     color: 0x000000, transparent: true, opacity: 0.3, depthWrite: false,
   });
-  let cap = 0, bodies = null, heads = null, blobs = null;
+  let cap = 0, bodies = null, legs = null, heads = null, blobs = null;
 
   function ensureCap(n) {
     if (n <= cap) return;
     cap = Math.max(64, 1 << Math.ceil(Math.log2(n)));
-    for (const m of [bodies, heads, blobs]) if (m) { group.remove(m); m.dispose(); }
+    for (const m of [bodies, legs, heads, blobs]) if (m) { group.remove(m); m.dispose(); }
+    // bodies first: X8 takes the first CapsuleGeometry in the group as the torso
     bodies = new THREE.InstancedMesh(geoBody, matCheap, cap);
+    legs = new THREE.InstancedMesh(geoLegs, matCheap, cap);
     heads = new THREE.InstancedMesh(geoHead, matCheap, cap);
     blobs = new THREE.InstancedMesh(geoBlob, matBlob, cap);
-    for (const m of [bodies, heads, blobs]) {
+    for (const m of [bodies, legs, heads, blobs]) {
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       m.frustumCulled = false;         // one mesh spans the whole floor
       m.count = 0;
@@ -250,6 +310,9 @@ export function createCharacters(opts = {}) {
     if (o.variants && man.extraClips) {
       wanted.walk2 = man.extraClips.walk_formal;
       wanted.idle2 = man.extraClips.idle_foldarms;
+      // third idle. NOT idle_talking_loop, which is already `talk` for `meet`:
+      // someone alone at the cooler talking to nobody looks wrong
+      wanted.idle3 = man.extraClips.idle_phone;
     }
     if (o.nodOnPrompt && man.extraClips) wanted.nod = man.extraClips.nod;
 
@@ -264,8 +327,6 @@ export function createCharacters(opts = {}) {
     template = rig.scene;
     clips = {};
     for (const [key, clip] of got) if (clip) clips[key] = clip;
-    // the manifest calls walk_formal the better office walk, so it leads
-    if (clips.walk2) { const w = clips.walk; clips.walk = clips.walk2; clips.walk2 = w; }
     prepare();
     return info;
   }
@@ -283,17 +344,28 @@ export function createCharacters(opts = {}) {
   }
 
   function prepare() {
+    /* walk_formal_loop leads. Here and name-keyed, not out in load(): load(pre)
+       returns early, so a swap out there inverted the preloaded path — the boss lost
+       his composed walk and every test ran a different assignment than the app. */
+    if (clips.walk2 && /formal/i.test(clips.walk2.name || '')) {
+      const w = clips.walk; clips.walk = clips.walk2; clips.walk2 = w;
+    }
     if (!clips.idle) clips.idle = clips.walk || clips.type || clips.talk || null;
     if (!clips.idle) {
       warn('rig ' + info.rig + ' carries no usable clip — capsule stand-ins only');
       template = null;
       return;
     }
+    let split = 0;
     template.traverse(c => {
       if (!c.isMesh) return;
       c.castShadow = c.receiveShadow = false;    // blob shadows only
       c.frustumCulled = false;                   // a skinned bbox is the bind pose and pops
+      // on the TEMPLATE: clone shares geometry, so one partition dresses all 40 rigs
+      if (!JOINT_MAT.test((c.material && c.material.name) || '') && splitRegions(c)) split++;
     });
+    info.notes.push(split ? 'split ' + split + ' mesh into skin/shirt/trouser ranges'
+                          : 'no mesh could be partitioned — one tone per person');
 
     let pruned = 0;
     for (const key in clips) { stripRootDrift(clips[key]); pruned += pruneStatic(clips[key]); }
@@ -322,6 +394,50 @@ export function createCharacters(opts = {}) {
     info.mode = 'rig';
     if (info.missing.length) warn('no clip or layer for: ' + info.missing.join(', '));
     gen++;        // stand-ins already on the floor upgrade on the next sync
+  }
+
+  /* Re-order the index buffer into three contiguous ranges so one mesh draws as skin,
+     shirt and trousers with three shared materials and no per-person geometry.
+     By dominant bone, never by height: the hands sit at 0.92 in bind pose, right in
+     the middle of the torso's band. */
+  function splitRegions(mesh) {
+    const g = mesh.geometry;
+    if (Array.isArray(mesh.material)) return true;   // already partitioned; idempotent
+    const si = g.attributes.skinIndex, sw = g.attributes.skinWeight;
+    if (!si || !sw || !g.index || !mesh.skeleton) return false;
+    const bones = mesh.skeleton.bones;
+    const vreg = new Uint8Array(si.count);
+    for (let i = 0; i < si.count; i++) {
+      let best = 0, bw = -1;
+      for (const k of ['X', 'Y', 'Z', 'W']) {
+        const w = sw['get' + k](i);
+        if (w > bw) { bw = w; best = si['get' + k](i); }
+      }
+      const b = bones[best];
+      vreg[i] = b ? regionOfBone(b.name) : R_SHIRT;
+    }
+    const idx = g.index.array, tris = idx.length / 3;
+    const buckets = [[], [], []];
+    for (let t = 0; t < tris; t++) {
+      const a = vreg[idx[t * 3]], b = vreg[idx[t * 3 + 1]], c = vreg[idx[t * 3 + 2]];
+      buckets[a === b || a === c ? a : b === c ? b : a].push(t);
+    }
+    if (buckets.filter(b => b.length).length < 2) return false;   // nothing to split
+    const out = new idx.constructor(idx.length);
+    let at = 0;
+    g.clearGroups();
+    for (let r = 0; r < 3; r++) {
+      const start = at;
+      for (const t of buckets[r]) {
+        out[at++] = idx[t * 3]; out[at++] = idx[t * 3 + 1]; out[at++] = idx[t * 3 + 2];
+      }
+      if (at > start) g.addGroup(start, at - start, r);
+    }
+    g.index.set(out);
+    g.index.needsUpdate = true;
+    // one entry per region, replaced by paint(); Mesh.copy slices the array
+    mesh.material = [mesh.material, mesh.material, mesh.material];
+    return true;
   }
 
   /* Root motion is baked into the locomotion clips: walk_loop translates `root`
@@ -521,25 +637,60 @@ export function createCharacters(opts = {}) {
      out as roughly a plain multiply by this. */
   const BACK = 0.24;
 
-  /* Tint by p.hue the way the 2D view does, desaturating when idle. Multiplying
-     the source colour keeps the model's own light/dark split so a character does
-     not go flat monochrome. Cached per (material, hue bucket, idle, knocked back):
-     a few dozen materials for 135 people. */
-  function tinted(src, hue, idle, back) {
-    const bucket = (Math.round(hue / 12) | 0) + (idle ? 1000 : 0) + (back ? 2000 : 0);
-    const k = src.uuid + '|' + bucket;
+  /* Keyed on the COLOUR, not the person, so three tones per rig still collapse onto a
+     few dozen materials. SET, not lerped toward: this rig has one flat colour per mesh,
+     so a lerp preserved no light/dark split, only a wash a skin tone cannot survive. */
+  function tinted(src, col, back) {
+    const k = src.uuid + '|' + col.getHexString() + (back ? '|b' : '');
     let m = tints.get(k);
     if (!m) {
       m = src.clone();
-      // sRGB explicitly: setHSL defaults to the WORKING colour space, which is
-      // linear, so 0.56 would land at sRGB 79% and a person renders as a white-hot
-      // chip instead of a body. office.js's torso is shade(hue, 60, 50) — sRGB.
-      color.setHSL(hue / 360, idle ? 0.16 : 0.58, idle ? 0.42 : 0.56, THREE.SRGBColorSpace);
-      m.color = (src.color ? src.color.clone() : new THREE.Color(0xffffff)).lerp(color, 0.6);
+      m.color = col.clone();
       if (back) m.color.multiplyScalar(BACK);
       tints.set(k, m);
     }
     return m;
+  }
+
+  /* Memoised: personPalette's cache key is a string, and building 95 of those a frame
+     was two thirds of this layer's frame cost. Shared by both LODs, so nobody changes
+     colour crossing the boundary. */
+  function palOf(a, p, idle) {
+    if (!a.pal || a.palHue !== p.hue || a.palIdle !== idle) {
+      a.pal = personPalette(p.hue, a.h, idle, !!p.boss);
+      a.palHue = p.hue; a.palIdle = idle;
+    }
+    return a.pal;
+  }
+
+  /* The source comes from userData, never from ch.material: reading the current
+     material tinted the ALREADY tinted one on every idle or focus flip, so the colour
+     crept and the cache grew an entry per mesh per flip for the whole session. */
+  function paint(a, p, idle, back) {
+    const pal = palOf(a, p, idle);
+    const tone = [pal.skin, pal.shirt, pal.trouser];
+    a.root.traverse(ch => {
+      if (!ch.isMesh) return;
+      const src = ch.userData.srcMat;
+      ch.material = Array.isArray(src)
+        ? src.map((s, r) => tinted(s, tone[r] || pal.shirt, back))
+        : tinted(src, JOINT_MAT.test(src.name || '') ? pal.joint : pal.shirt, back);
+    });
+  }
+
+  // declared once, not per person per frame: a closure over the loop body is 95
+  // allocations a frame for no gain
+  function putPart(mesh, i, col, x, z, a, y, sy, lift, pitch, back) {
+    const b = a.build;
+    scratch.position.set(x, y * b.hy + lift, z);
+    scratch.quaternion.copy(a.q);
+    if (pitch) scratch.rotateX(pitch);
+    scratch.scale.set(b.hw, b.hy * sy, b.hw);
+    scratch.updateMatrix();
+    mesh.setMatrixAt(i, scratch.matrix);
+    color.copy(col);
+    if (back) color.multiplyScalar(BACK);
+    mesh.setColorAt(i, color);
   }
 
   /* Whether a focus or a search excludes this person, which is the 2D view's own rule for
@@ -563,12 +714,16 @@ export function createCharacters(opts = {}) {
   function makeAvatar(p) {
     return {
       p, key: p.key, lod: 'none', gen: -1, h: hashOf(p),
+      // decided once, and read by both LODs so nobody changes shape crossing over
+      build: buildOf(hashOf(p), !!p.boss, o),
       root: null, mixer: null, acts: null, base: null, baseKey: '',
       shot: null, addShot: null, desk: null, fastT: 0,
       pulse: null, pulseT: 0,
       gesture: p.gesture || '', lastEvent: p.last,
       q: new THREE.Quaternion().setFromEuler(new THREE.Euler(0, (FACE_YAW[p.face] || 0) + yaw0, 0)),
       px: p.x, pz: p.y, ground: 0, idle: null, hue: -1, back: null,
+      pal: null, palHue: -1, palIdle: null,
+      sitOff: p.state === 'type' ? o.sitFwd : 0,     // 0..o.sitFwd
     };
   }
 
@@ -584,7 +739,13 @@ export function createCharacters(opts = {}) {
     // SkeletonUtils.clone: a plain .clone() shares the skeleton and everyone
     // animates identically. The rig has TWO skinned meshes; clone handles both.
     const root = skeletonClone(template);
-    if (p.boss) root.scale.setScalar(o.bossScale);
+    /* Root scale scales the posed result, so the shared `desk` layer's 0.75 target
+       lands at 0.75 * hy and a short person's hands rest ~7 cm under the desk.
+       Accepted, deliberately: per-person would mean 40 clips, and the desk occludes
+       it at this camera. Do not "fix" it by dropping the height spread. */
+    root.scale.set(a.build.hw, a.build.hy, a.build.hw);
+    // kept so paint() never tints a tinted material
+    root.traverse(ch => { if (ch.isMesh) ch.userData.srcMat = ch.material; });
     const mixer = new THREE.AnimationMixer(root);
     a.root = root; a.mixer = mixer; a.acts = {};
     a.base = null; a.baseKey = ''; a.shot = null; a.addShot = null; a.desk = null;
@@ -620,8 +781,9 @@ export function createCharacters(opts = {}) {
 
   function setClip(a, key, fade) {
     let want = key;
-    // two walks and two idles so a corridor is not one pose
-    if (o.variants && (a.h & 1) && clips[key + '2']) want = key + '2';
+    // a variant the rig does not carry falls back to the default clip
+    const v = o.variants && a.build.variant[key];
+    if (v && clips[key + v]) want = key + v;
     const next = actionFor(a, want) || actionFor(a, 'idle');
     if (!next) return;
     if (a.shot) { a.shot.fadeOut(fade || o.gestureFade); a.shot = null; }
@@ -769,6 +931,14 @@ export function createCharacters(opts = {}) {
       const isIdle = clock - p.last > idleAfter;
       const back = backOf(p, focus, q, personText);
 
+      /* Settle into the chair (see o.sitFwd). Eased, not applied on the state change,
+         so sitting down and standing up slide rather than snap — the cheap half of
+         sitting_enter / sitting_exit. Snapped while the sim teleports people. */
+      const fwd = FACE_FWD[p.face] || FACE_FWD[2];
+      const sitTo = seated ? o.sitFwd : 0;
+      a.sitOff = ff ? sitTo : a.sitOff + (sitTo - a.sitOff) * Math.min(1, dt * 6);
+      const ox = p.x + fwd[0] * a.sitOff, oz = p.y + fwd[1] * a.sitOff;
+
       if (a.lod === 'full') {
         const key = CLIP_FOR[p.state] || 'idle';
         if (key !== a.baseKey) {
@@ -784,57 +954,36 @@ export function createCharacters(opts = {}) {
           if (a.desk) a.desk.setEffectiveTimeScale(a.fastT > 0 ? 2.4 : 1);
         }
         if (a.hue !== p.hue || a.idle !== isIdle || a.back !== back) {
-          a.root.traverse(ch => {
-            if (ch.isMesh) ch.material = tinted(ch.material, p.hue, isIdle, back);
-          });
+          paint(a, p, isIdle, back);
           a.hue = p.hue; a.idle = isIdle; a.back = back;
         }
-        a.root.position.set(p.x, 0, p.y);
+        a.root.position.set(ox, 0, oz);
         a.root.quaternion.copy(a.q);
         if (pitch) a.root.rotateX(pitch);
         // mixers are meaningless while the sim teleports people: freeze the pose
         if (!ff && dt > 0) a.mixer.update(dt);
       } else {
         const i = nCheap++;
-        const s = p.boss ? o.bossScale : 1;
+        const pose = seated ? POSE.sit : POSE.stand;
         const bob = p.state === 'walk' ? Math.abs(Math.sin(p.phase)) * 0.06
           : Math.sin(p.bob) * 0.018;
         const lift = ff ? 0 : bob;
-        scratch.quaternion.copy(a.q);
-        if (pitch) scratch.rotateX(pitch);
-        color.setHSL(p.hue / 360, isIdle ? 0.16 : 0.58, isIdle ? 0.38 : 0.55,
-                     THREE.SRGBColorSpace);   // see the note on the rigged tint above
-        if (back) color.multiplyScalar(BACK);
-
-        scratch.position.set(p.x, (seated ? 0.66 : 0.79) * s + lift, p.y);
-        scratch.scale.set(s, s * (seated ? 0.66 : 1), s);
-        scratch.updateMatrix();
-        bodies.setMatrixAt(i, scratch.matrix);
-        bodies.setColorAt(i, color);
-
-        scratch.position.set(p.x, (seated ? 1.33 : 1.68) * s + lift, p.y);
-        scratch.scale.setScalar(s);
-        scratch.updateMatrix();
-        heads.setMatrixAt(i, scratch.matrix);
-        // set, not offsetHSL: that would do the arithmetic in linear HSL and undo
-        // the colour space we just asked for
-        color.setHSL(p.hue / 360,
-          Math.max(0, (isIdle ? 0.16 : 0.58) - 0.08),
-          Math.min(1, (isIdle ? 0.38 : 0.55) + 0.1), THREE.SRGBColorSpace);
-        if (back) color.multiplyScalar(BACK);
-        heads.setColorAt(i, color);
+        const pal = palOf(a, p, isIdle);
+        putPart(legs, i, pal.trouser, ox, oz, a, pose.legY, pose.legS, lift, pitch, back);
+        putPart(bodies, i, pal.shirt, ox, oz, a, pose.torsoY, pose.torsoS, lift, pitch, back);
+        putPart(heads, i, pal.skin, ox, oz, a, pose.headY, 1, lift, pitch, back);
       }
 
-      scratch.position.set(p.x, 0.02, p.y);
+      scratch.position.set(ox, 0.02, oz);
       scratch.quaternion.identity();
-      scratch.scale.setScalar(seated ? 0.8 : 1);
+      scratch.scale.setScalar((seated ? 0.8 : 1) * a.build.hw);
       scratch.updateMatrix();
       blobs.setMatrixAt(nAll++, scratch.matrix);
     }
 
-    bodies.count = heads.count = nCheap;
+    bodies.count = legs.count = heads.count = nCheap;
     blobs.count = nAll;
-    for (const m of [bodies, heads, blobs]) {
+    for (const m of [bodies, legs, heads, blobs]) {
       m.instanceMatrix.needsUpdate = true;
       if (m.instanceColor) m.instanceColor.needsUpdate = true;
     }
@@ -852,9 +1001,9 @@ export function createCharacters(opts = {}) {
 
   function dispose() {
     for (const key of [...avatars.keys()]) drop(key);
-    for (const m of [bodies, heads, blobs]) if (m) { group.remove(m); m.dispose(); }
-    bodies = heads = blobs = null; cap = 0;
-    for (const g of [geoBody, geoHead, geoBlob]) g.dispose();
+    for (const m of [bodies, legs, heads, blobs]) if (m) { group.remove(m); m.dispose(); }
+    bodies = legs = heads = blobs = null; cap = 0;
+    for (const g of [geoBody, geoLegs, geoHead, geoBlob]) g.dispose();
     matCheap.dispose(); matBlob.dispose();
     for (const m of tints.values()) m.dispose();
     tints.clear();
@@ -890,11 +1039,74 @@ export function selfTest() {
     'type takes the seated clip, not idle');
   ok(pickClip(cl(['idle_loop']), 'point') === null, 'a missing gesture is null, not a wrong clip');
 
-  // the sim walks people at 2.0-2.39 tiles/s against a 0.975 u/s clip
-  const r = walkScale(2.2, 0.975);
-  ok(r > 2.2 && r < 2.3, 'sim speed 2.2 -> ~2.26x, got ' + r);
+  // sim.js's 1.06-1.49 tiles/s against a 0.975 u/s clip; ~1.6x is where a walk cycle
+  // stops reading as walking
   ok(walkScale(0.975, 0.975) === 1, 'the reference speed plays at 1x');
+  // the boss's own band (0.86-0.99) sits strictly below everyone else's (1.06-1.49)
+  for (const [v, lo, hi] of [[0.86, 0.85, 1.0], [1.06, 1.05, 1.15], [1.49, 1.45, 1.6]]) {
+    const r = walkScale(v, 0.975);
+    ok(r > lo && r < hi, 'ground ' + v + ' should play at ' + lo + '-' + hi + 'x, got ' + r);
+  }
+  ok(walkScale(2.39, 0.975) > 2.4, 'the old 2.39 tiles/s really was 2.45x — the thing we left');
   ok(walkScale(0, 0.975) === 0.35 && walkScale(99, 0.975) === 2.6, 'clamped both ends');
+
+  // sim.js-shaped hashes, whose high bits barely move between siblings — the case
+  // buildOf has to mix before it slices
+  const O = { height: [0.885, 0.995], width: [0.97, 1.03], bossScale: 1.06, variants: true };
+  const sib = i => { let x = 0; for (const c of 's1|a' + i) x = (x * 31 + c.charCodeAt(0)) >>> 0; return x; };
+  const builds = [], hs = [], widths = [], idles = new Set(), walks = new Set();
+  for (let i = 0; i < 24; i++) {
+    const bd = buildOf(sib(i), false, O);
+    builds.push(bd); hs.push(bd.hy.toFixed(4)); widths.push((bd.hw / bd.hy).toFixed(4));
+    idles.add(bd.variant.idle); walks.add(bd.variant.walk);
+    ok(bd.hy >= 0.885 - 1e-9 && bd.hy <= 0.995 + 1e-9, 'height out of range: ' + bd.hy);
+    const rel = bd.hw / bd.hy;
+    ok(rel >= 0.97 - 1e-9 && rel <= 1.03 + 1e-9, 'width out of range: ' + rel);
+  }
+  ok(JSON.stringify(buildOf(sib(3), false, O)) === JSON.stringify(builds[3]),
+    'buildOf must be a pure function of p.h — a scrub has to rebuild the same floor');
+  ok(new Set(hs).size >= 6, 'only ' + new Set(hs).size + ' heights across 24 siblings — ' +
+    'the hash slice is unmixed again, which dressed a whole room as one body');
+  ok(new Set(widths).size >= 3, 'widths barely move: ' + new Set(widths).size);
+  ok(idles.size === 3 && walks.size === 2, 'siblings do not cover every clip variant: ' +
+    [...idles].join() + ' / ' + [...walks].join());
+
+  const boss = buildOf(sib(3), true, O);
+  ok(boss.hy > builds[3].hy && boss.hw / boss.hy > builds[3].hw / builds[3].hy,
+    'the boss must be taller AND broader than the same person would be');
+  ok(boss.variant.idle === '2' && boss.variant.walk === '',
+    'a boss folds his arms and takes the composed walk, whatever his hash says');
+
+  ok(regionOfBone('Head') === R_SKIN && regionOfBone('hand_r') === R_SKIN,
+    'head and hands are skin');
+  ok(regionOfBone('thigh_l') === R_TROUSER && regionOfBone('pelvis') === R_TROUSER,
+    'hips and legs are trousers');
+  ok(regionOfBone('upperarm_l') === R_SHIRT && regionOfBone('spine_02') === R_SHIRT,
+    'arms and spine are shirt');
+  ok(regionOfBone('ball_leaf_r') === R_TROUSER, 'a leaf bone follows its chain');
+
+  /* sitFwd's window. Body extents measured off the skinned seated rig; the rest are
+     props.js's chair and desk and step()'s shove, i.e. other people's files — so this
+     is what notices if the furniture moves. */
+  const SEAT = { rear: -0.400, front: 0.369, backRear: -0.30, backFace: -0.20,
+                 pedestal: 0.66, shove: 0.13 };
+  const so = DEFAULTS.sitFwd;
+  ok(SEAT.rear + so > SEAT.backRear,
+    'sitFwd ' + so + ' leaves the lower back out the far side of the chair — the bug');
+  ok(SEAT.rear + so < SEAT.backFace,
+    'sitFwd ' + so + ' lifts the back clear of the cushion; it should rest against it');
+  ok(SEAT.front + so + SEAT.shove < SEAT.pedestal,
+    'sitFwd ' + so + ' puts a foot inside the desk when somebody walks past');
+  ok(SEAT.rear + so > -0.26 - 0.10,
+    'sitFwd ' + so + ' still hangs the buttocks off the back of a seat pad ending at -0.26');
+  /* That margin is also the entire budget for a chair that is not exactly on its tile:
+     props.js jitters team chairs, and its slide ALONG the facing has to stay under this
+     or the back pokes out again. Yaw and sideways slide are free. */
+  ok(SEAT.rear + so - SEAT.backRear > 0.03,
+    'under 30mm behind the cushion — no room left for a chair that has been nudged');
+  ok(FACE_FWD[0][1] === -1 && FACE_FWD[2][1] === 1 &&
+     FACE_FWD[1][0] === 1 && FACE_FWD[3][0] === -1,
+    'the settle must push the way the contract says N/E/S/W point');
 
   const R1 = { id: 1 }, R2 = { id: 2 };
   const ppl = [];

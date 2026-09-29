@@ -49,17 +49,13 @@ _seq = [0]      # monotonic cursor -- see _tick()
 _lock = threading.Lock()          # scan() mutates every global above
 _listed = [0.0, [], [], 0, None]  # when, boss paths, agent paths, session dirs, root
 _scanned = [0.0]                  # when the last scan ran
-# Drift watch: officelapse reads a private log format. If a release renames fields
-# or moves subagents/, we still find and read the files but recognise nothing in
-# them -- an empty floor that looks exactly like "no sessions yet". These counters
-# ride along with the parse we already do so the two can be told apart. All of them
-# reset per scan, so a verdict always describes the poll it came from.
+# Drift watch: a renamed field leaves us reading files and recognising nothing,
+# which looks exactly like "no sessions yet". Reset per scan, so a verdict is current.
 _health = {"files": 0, "unreadable_files": 0, "lines": 0, "unrecognised": 0,
            "assistant_rows": 0, "tool_blocks": 0, "session_dirs": 0, "agent_files": 0}
 
-# One fact can be written under different names across Claude Code releases: take
-# the first name a row actually carries. A rename then costs one word here instead
-# of a silent fallback -- custom-title rows already needed this.
+# One fact, several names across releases: the first name a row carries wins.
+# custom-title rows already needed this.
 FIELDS = {"cwd": ("cwd",), "branch": ("gitBranch",),
           "title": ("aiTitle", "customTitle")}
 
@@ -354,12 +350,9 @@ def health():
 
 class H(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        # Binding to 127.0.0.1 does not keep other origins out: a page you visit can
-        # point its own hostname at 127.0.0.1 (DNS rebinding) and the browser then
-        # treats this server's replies as same-origin and reads them -- every prompt,
-        # path and branch in the window. The Host header still carries the attacker's
-        # name, so checking it is the whole defence. A token in the URL is not: it
-        # leaks through history, referrers and screen-shares.
+        # DNS rebinding: a page can point its own hostname at 127.0.0.1 and read the
+        # reply as same-origin. The Host header still names it. Not a URL token —
+        # those leak through history and screen-shares.
         if self.headers.get("Host") not in _HOSTS:
             self.send_error(403, "Host not allowed")
             return
@@ -398,6 +391,21 @@ class H(http.server.SimpleHTTPRequestHandler):
             return
         self.path = "/index.html" if u.path == "/" else u.path
         return super().do_GET()
+
+    def do_HEAD(self):
+        # same guard as do_GET: HEAD leaks no body, but it should not answer a
+        # rebound origin either, and it has its own handler
+        if self.headers.get("Host") not in _HOSTS:
+            self.send_error(403, "Host not allowed")
+            return
+        return super().do_HEAD()
+
+    def end_headers(self):
+        # Everything is on localhost, so caching buys nothing and costs a whole
+        # class of bug: the browser held a stale props.js against a fresh scene.js
+        # and the floor rendered black with one TypeError.
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
 
     def log_message(self, *a):
         pass

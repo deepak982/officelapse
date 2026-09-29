@@ -118,6 +118,9 @@ export const COL = {
   leafDeep:    c('#2f6440'),
   pot:         c('#5b4636'),
   white:       c('#e8edf5'),
+  ceramic:     c('#e4ded2'),     // warm, so a mug is not office plastic
+  coffee:      c('#3f2a1d'),
+  coat:        c('#6e4a3f'),     // a garment, not COL.wood and not the chair's own fabric
   ink:         c('#9aa4b8'),
   /* the three states of a monitor: nobody holds the desk, its owner is logged on but
      paused, its owner is working. screenOff is baked into the shell by props.js; the
@@ -184,6 +187,51 @@ export function amColor(kind) {
   return col;
 }
 
+/* ---------------------------------------------------------------- people --- */
+/* Clothing is low-chroma, so p.hue is an identity and not a shirt: hue-by-hash at
+   s 58% renders a floor of highlighters. The hue stays, because office.js draws the
+   same one; the chroma comes down, and trousers and skin come off p.h instead, so two
+   people on one department hue still differ. Both ladders are short on purpose. */
+const SKIN = ['#e9c6a0', '#dcab7c', '#c8916a', '#ab7551', '#8b5c3e', '#6d4731'];
+const TROUSER = ['#2e3440', '#2a3350', '#3a3128', '#38404d', '#332f3b'];
+/* Four steps, so a desk row is not one value. Held inside .44-.59: X8 pins a
+   character's albedo to office.js's shade(hue, 60, 50), i.e. 50% +/- 12. */
+const SHIRT_L = [.44, .49, .54, .59];
+const SHIRT_S = .34, SHIRT_S_IDLE = .12;
+// the boss's jacket: the department hue, twice the chroma, half the lightness
+const JACKET = { s: .46, l: .31, sIdle: .20, lIdle: .26, trouser: '#22262f' };
+// the mannequin's ball joints, one dark tone rather than a fourth outfit region
+const JOINT = '#2b2f3a';
+
+/* sim.js's multiply, for its reason: hash() is a plain *31 roll, so sibling keys
+   share every bit above ~8 and an unmixed slice dresses a whole room identically. */
+const MIX = 2654435761;
+export const mixHash = h => Math.imul(h >>> 0, MIX) >>> 0;
+
+// cached: one entry per person per idle state, a few hundred Colors at most
+const palCache = new Map();
+export function personPalette(hue, h, idle, boss) {
+  const m = mixHash(h);
+  const key = (hue | 0) + ':' + (m % 262144) + (idle ? 'i' : '') + (boss ? 'b' : '');
+  let pal = palCache.get(key);
+  if (!pal) {
+    const shirt = new THREE.Color();
+    if (boss) {
+      shirt.setHSL(hue / 360, idle ? JACKET.sIdle : JACKET.s,
+        idle ? JACKET.lIdle : JACKET.l, THREE.SRGBColorSpace);
+    } else {
+      // -.04 and no more: X8's +/-.12 window round 50% is the floor
+      shirt.setHSL(hue / 360, idle ? SHIRT_S_IDLE : SHIRT_S,
+        SHIRT_L[(m >>> 3) % SHIRT_L.length] - (idle ? .04 : 0), THREE.SRGBColorSpace);
+    }
+    pal = { shirt, trouser: c(boss ? JACKET.trouser : TROUSER[(m >>> 8) % TROUSER.length]),
+            skin: c(SKIN[(m >>> 13) % SKIN.length]), joint: c(JOINT) };
+    if (idle) for (const k of ['trouser', 'skin', 'joint']) pal[k].multiplyScalar(.8);
+    palCache.set(key, pal);
+  }
+  return pal;
+}
+
 /* A room the camera is not focused on. Same instanced batch, just a darker tint —
    the 2D view drops it to alpha .1, which instancing cannot do per instance. */
 export const DIM = new THREE.Color(0.16, 0.17, 0.22);
@@ -243,6 +291,7 @@ export function dispose() {
   plateCache.clear();
   deptCache.clear();
   amCache.clear();
+  palCache.clear();
   GROUND.dispose();
   CORRIDOR.dispose();
 }

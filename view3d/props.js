@@ -71,6 +71,16 @@ function frame(w, h) {
   };
 }
 
+/* Which desk gets a mug, which chair nobody straightened. A hash of the TILE, never
+   Math.random() — a scrub rebuilds the floor from scratch and random would redecorate
+   it. The mix round is load-bearing, not decoration: desks sit on a rigid lattice and
+   the low bits of (x*k ^ y*k) alone march in step with it. */
+export function tileHash(x, y) {
+  let v = (Math.imul(x | 0, 73856093) ^ Math.imul(y | 0, 19349663)) >>> 0;
+  v = Math.imul(v ^ (v >>> 15), 2246822519);
+  return (v ^ (v >>> 13)) >>> 0;
+}
+
 /* ---------------------------------------------------------------- merge --- */
 /* Concatenates parts into one buffer per material, baking each part's colour into
    a vertex-colour attribute. Everything is flattened to non-indexed first, so the
@@ -145,6 +155,15 @@ function chairParts(x, z, dir) {
   else if (dir === 2) p.push(bx(MAT.fabric, COL.fabricBack, x + .24, H.seat, z + .20, .52, bh, .10));
   else if (dir === 1) p.push(bx(MAT.fabric, COL.fabricBack, x + .70, H.seat, z + .24, .10, bh, .52));
   else p.push(bx(MAT.fabric, COL.fabricBack, x + .20, H.seat, z + .24, .10, bh, .52));
+  return p;
+}
+
+/* The same chair, nudged. Built about the tile centre because the shell is one rigid
+   lump and cannot be rotated per chair. Tiny on purpose: characters.js plants a seated
+   person on the tile centre, so a chair that really slid out leaves them floating. */
+function chairAt(x, z, dir, yaw, dx, dz) {
+  const p = chairParts(-.5, -.5, dir);
+  for (const q of p) q.geom.rotateY(yaw).translate(x + .5 + dx, 0, z + .5 + dz);
   return p;
 }
 
@@ -403,6 +422,88 @@ const BUILD = {
 };
 BUILD.board = BUILD.whiteboard;   // floor.js's room interior still says 'board'
 
+/* ------------------------------------------------------------- clutter --- */
+/* Things that sit ON props; floor.js has no idea they exist. Built about the centre of
+   the base, so a caller needs only a translate to a surface top (`jacket` excepted).
+   ONE material each — that is what makes a piece merge to a single bucket and cost one
+   draw call for the whole floor however many are placed. Nothing reaches past .15 of a
+   tile: at Fit zoom a mug is two pixels. */
+const CLUTTER = {
+  mug() {
+    return [
+      cy(MAT.plastic, COL.plasticPale, 0, 0, 0, .075, .11, 8),
+      cy(MAT.plastic, COL.dark, 0, .095, 0, .058, .014, 8),          // what is in it
+      bx(MAT.plastic, COL.plasticPale, .07, .03, -.025, .04, .05, .05),
+    ];
+  },
+  /* pre-skewed against each other, so the caller's yaw reads as a hand, not a rotation */
+  papers() {
+    const p = [];
+    for (let i = 0; i < 3; i++) {
+      const q = bx(MAT.paper, i === 2 ? COL.art[3][0] : COL.white,
+                   -.11, i * .007, -.08, .22, .005, .16);
+      q.geom.rotateY((i - 1) * .15);
+      p.push(q);
+    }
+    return p;
+  },
+  notebook() {
+    return [
+      bx(MAT.paper, COL.dark, -.10, 0, -.07, .20, .020, .14),
+      bx(MAT.paper, COL.white, -.085, .020, -.055, .17, .010, .11),
+      bx(MAT.paper, COL.dark, -.10, .030, -.07, .20, .010, .14),
+    ];
+  },
+  pencup() {
+    const p = [cy(MAT.plastic, COL.metalDark, 0, 0, 0, .065, .12, 8)];
+    const at = [[-.025, -.02], [.02, -.025], [.005, .025]];
+    for (let i = 0; i < 3; i++)
+      p.push(bx(MAT.plastic, COL.art[i * 3][0],
+                at[i][0] - .008, .09, at[i][1] - .008, .016, .12, .016));
+    return p;
+  },
+  /* the only saturated piece, hence the rarest — green is what a desk of grey boxes lacks */
+  deskplant() {
+    return [
+      cy(MAT.plant, COL.pot, 0, 0, 0, .075, .09, 8),
+      sp(MAT.plant, COL.leaf, 0, .16, 0, .085),
+      sp(MAT.plant, COL.leafDeep, -.045, .12, .03, .055),
+      sp(MAT.plant, COL.leaf, .05, .13, -.03, .05),
+    ];
+  },
+  tray() {
+    return [
+      bx(MAT.plastic, COL.metalDark, -.15, 0, -.11, .30, .022, .22),
+      cy(MAT.plastic, COL.plasticPale, -.07, .022, 0, .05, .085, 8),
+      cy(MAT.plastic, COL.white, .07, .022, -.005, .075, .026, 10),
+    ];
+  },
+  /* the caller places this BELOW the bin rim, so the paper pokes out of it */
+  litter() {
+    return [
+      sp(MAT.paper, COL.white, -.07, .075, .02, .072),
+      sp(MAT.paper, COL.ink, .065, .058, -.05, .056),
+      sp(MAT.paper, COL.white, .01, .105, -.01, .052),
+    ];
+  },
+  /* In the CHAIR's frame, not centred: it hangs on the back panel chairParts() puts at
+     z .70 facing N, so the caller reuses the chair's own matrix. Brown, or it reads as
+     more upholstery. */
+  jacket() {
+    return [
+      bx(MAT.fabric, COL.woodDark, .20, .38, .63, .60, .54, .20),
+      bx(MAT.fabric, COL.pot, .26, .30, .66, .16, .30, .13),
+      bx(MAT.fabric, COL.pot, .58, .32, .66, .16, .26, .13),
+    ];
+  },
+};
+
+export function buildClutter(type) {
+  const fn = CLUTTER[type];
+  if (!fn) return unknown('clutter:' + type, 1, 1);
+  return mergeParts(fn());
+}
+
 /* Drawn by the room shell, not as props: 'pod' marks a desk cluster and
    'bossdesk' the desk under Floor's r.boss, and both are already built from
    r.desks / r.boss. office.js skips them in drawProp for the same reason. */
@@ -503,7 +604,14 @@ export function buildRoomShell(Floor, r) {
   for (const d of r.desks.concat([r.boss])) {
     const q = rel(d);
     parts.push(...deskParts(q.x, q.z, { x: q.sx, z: q.sz }, d === r.boss));
-    parts.push(...chairParts(q.sx, q.sz, d.dir));
+    /* the LOCAL tile: this shell is instanced for every room, so absolute would hand
+       them all the same answer anyway */
+    const t = tileHash(q.sx, q.sz);
+    /* dz stays 0: sliding a chair along its facing carries the backrest into whoever
+       is sitting in it, and characters.js has only 0.040 of clearance there. Yaw and
+       dx break the ruled-grid read on their own. */
+    parts.push(...chairAt(q.sx, q.sz, d.dir, ((t & 7) - 3.5) * .055,
+                          (((t >>> 3) & 3) - 1.5) * .045, 0));
   }
   return mergeParts(parts);
 }

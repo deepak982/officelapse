@@ -499,6 +499,95 @@ function addProp(pr, rect, color) {
   b.push(T, color);
 }
 
+/* ----------------------------------------------------------------- clutter --- */
+/* A bare desk in a grid of identical bare desks reads as a station, not as somebody's
+   place. ONE batch per clutter TYPE for the whole floor: the key is the type alone — no
+   room, no facility, no footprint — so draw calls grow with this vocabulary and never
+   with the room count. Placement is Props.tileHash of the tile it sits on, never
+   Math.random(): a scrub tears the floor down and rebuilds it. */
+const CL = (type, x, y, z, yaw) => {
+  const b = batch('cl|' + type, () => Props.buildClutter(type));
+  T.makeTranslation(x, y, z);
+  if (yaw) T.multiply(R.makeRotationY(yaw));
+  b.push(T, NEUTRAL);
+};
+
+/* flat things nobody squares up; spinning a mug about its own axis changes nothing */
+const SPUN = new Set(['papers', 'notebook']);
+
+/* Three slots on the desk's NEAR edge — props.js puts the monitor on the far side. Each
+   reads its own 3-bit slice and may come up empty, so a fifth of desks stay bare: every
+   desk carrying a mug is as uniform as none doing. Each item holds TWO of the eight
+   entries, or a 1-in-8 item can vanish on a small floor. */
+const DESK_SLOT = [
+  { dx: -.30, pick: ['mug', '', 'pencup', 'mug', '', 'pencup', '', ''] },
+  { dx: 0,    pick: ['papers', '', 'notebook', '', 'papers', 'notebook', '', ''] },
+  { dx: .30,  pick: ['', 'deskplant', '', '', 'papers', '', '', ''] },
+];
+
+function deskClutter(d, big) {
+  /* a boss desk is 1.9 wide against .96: spread the slots with it */
+  const w = big ? 1.9 : .96;
+  const cx = d.x + .02 + w / 2;
+  const cz = d.y + (d.seat.y > d.y ? .62 : .28);
+  const h = Props.tileHash(d.x, d.y);
+  for (let i = 0; i < DESK_SLOT.length; i++) {
+    const t = DESK_SLOT[i].pick[(h >>> (i * 3)) & 7];
+    if (!t) continue;
+    const j = (h >>> (9 + i * 2)) & 3;
+    CL(t, cx + DESK_SLOT[i].dx * (w / .96), Props.H.desk, cz + (j - 1.5) * .035,
+       SPUN.has(t) ? (j - 1.5) * .34 : 0);
+  }
+}
+
+/* Keyed on floor.js's prop TYPE, not on tiles, so a re-planned facility keeps its
+   clutter. `y` is that prop's top face in props.js. */
+const SURFACE = {
+  table:      { y: Props.H.table,     pick: ['tray', 'mug', '', 'papers', 'tray', '', 'mug', ''] },
+  roundtable: { y: Props.H.table,     pick: ['mug', '', 'papers', '', 'mug', 'papers', '', ''] },
+  longtable:  { y: Props.H.table,     pick: ['', 'mug', '', '', 'papers', '', 'notebook', ''] },
+  lowtable:   { y: Props.H.low,       pick: ['mug', 'papers', 'mug', '', 'papers', 'mug', '', 'papers'] },
+  counter:    { y: Props.H.counter,   pick: ['tray', '', 'papers', '', 'tray', '', 'mug', ''] },
+  cabinet:    { y: Props.H.cabinet,   pick: ['papers', '', '', 'notebook', '', '', 'papers', ''] },
+  printer:    { y: Props.H.printer,   pick: ['papers', '', 'papers', '', '', 'papers', '', ''] },
+  /* below the rim so the paper pokes out; no jitter, or it leans through the side */
+  bin:        { y: Props.H.bin - .10, jit: 0,
+                pick: ['litter', 'litter', '', 'litter', '', 'litter', '', 'litter'] },
+};
+
+/* One spot per tile along the prop's LONG axis — props.js's frame() builds long
+   furniture that way — on its mid-line, which is inside every type's top-face inset. */
+function surfaceClutter(rect) {
+  for (const pr of rect.props) {
+    /* Band chairs only: a team room's chairs are baked into the ONE shared shell, so a
+       jacket there would hang on the same chair in all 30 rooms. */
+    if (pr.type === 'chair') {
+      if (Props.tileHash(pr.x, pr.y) & 7) continue;             // one chair in eight
+      const b = batch('cl|jacket', () => Props.buildClutter('jacket'));
+      T.makeTranslation(pr.x + 0.5, 0, pr.y + 0.5)
+        .multiply(R.makeRotationY(DIR_ROT[chairDir(pr, rect)]))
+        .multiply(S.makeTranslation(-0.5, 0, -0.5));
+      b.push(T, NEUTRAL);
+      continue;
+    }
+    const s = SURFACE[pr.type];
+    if (!s) continue;
+    const alongX = pr.w >= pr.h;
+    const n = alongX ? pr.w : pr.h, cross = alongX ? pr.h : pr.w;
+    const jit = s.jit === undefined ? 1 : s.jit;
+    for (let i = 0; i < n; i++) {
+      const h = Props.tileHash(pr.x + (alongX ? i : 0), pr.y + (alongX ? 0 : i));
+      const t = s.pick[h & 7];
+      if (!t) continue;
+      const j = (h >>> 3) & 3, k = (h >>> 5) & 3;
+      const u = i + .5 + (j - 1.5) * .08 * jit;
+      const v = cross / 2 + (k - 1.5) * .09 * cross * jit;
+      CL(t, pr.x + (alongX ? u : v), s.y, pr.y + (alongX ? v : u),
+         SPUN.has(t) ? (k - 1.5) * .34 : 0);
+    }
+  }
+}
+
 /* Whether a shell is shown at its own colour or knocked back, for rooms and for the
    band. These are office.js's own predicates — its vis() and amDim() — and the one
    place either is decided, so a shell being BUILT and a shell being RE-TINTED can never
@@ -517,6 +606,11 @@ function buildRoom(r, Sim, Floor) {
   roomIdx.set(r.sid, shellBatch.push(T, roomTint(Sim, r)));
   for (const pr of r.props) addProp(pr, { gx: r.gx, gy: r.gy, w: r.w, h: r.h,
                                           props: r.props, desks: r.desks }, NEUTRAL);
+  /* ABSOLUTE tiles, not baked into the shell, so two rooms do not carry the same mugs
+     on the same desks */
+  for (const d of r.desks) deskClutter(d, false);
+  deskClutter(r.boss, true);
+  surfaceClutter(r);
 }
 
 /* The shell carries the facility's tint and its props do not — same division as a
@@ -535,6 +629,8 @@ function buildFacility(a, Floor) {
   T.makeTranslation(a.gx, 0, a.gy);
   b.push(T, amColor(a.kind));
   for (const pr of a.props) addProp(pr, a, NEUTRAL);
+  surfaceClutter(a);
+  for (const d of a.desks || []) deskClutter(d, false);   // only coworking has desks
   facDone.add(a);
 }
 

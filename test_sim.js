@@ -553,6 +553,49 @@ check('S19', 'a brief that names its worker renders as that name', () => {
   }
 });
 
+check('S20', 'people walk at a walking speed, and the boss walks slower than anyone', () => {
+  /* p.speed IS the 3D walk's playback rate in disguise (ground / 0.975), so the range
+     has to be a human one; ~1.6x is where a walk cycle stops reading as a walk. */
+  // the stride from the measured manifest, not a literal: if the clip is re-authored
+  // this moves with it (characters.js's walkRef is pinned to the same number)
+  const REF = require('./assets/manifest.json').clips.walk.rootMotion.unitsPerSecond;
+  const MAXRATE = 1.6;
+  fresh();
+  placeInstantly();
+  session('s1', 'alpha', 'Invoice PDF rewrite');
+  session('s2', 'beta', 'Ledger import');
+  const ids = Array.from({ length: 14 }, (_, i) => 'a' + i);
+  St.events = ['s1', 's2'].flatMap(s => [ev(100, s, null), ...ids.map(a => ev(100, s, a))]);
+  runTo(150);
+  const ppl = Object.values(St.people);
+  assert.strictEqual(ppl.length, 30, 'the fixture lost people');
+
+  let boss = null, slowestMate = Infinity;
+  const rates = new Set();
+  for (const p of ppl) {
+    const rate = p.speed / REF;
+    assert(rate > 0.8 && rate < MAXRATE,
+      `${p.key} walks at ${p.speed.toFixed(2)} tiles/s, i.e. the clip at ` +
+      `${rate.toFixed(2)}x — outside 0.8-${MAXRATE}x, which is not a walk any more`);
+    rates.add(rate.toFixed(2));
+    if (p.boss) boss = p; else slowestMate = Math.min(slowestMate, p.speed);
+  }
+  assert(boss, 'no boss in the fixture');
+  assert(boss.speed < slowestMate,
+    `the boss walks at ${boss.speed.toFixed(2)} and the slowest teammate at ` +
+    `${slowestMate.toFixed(2)} — a boss has to be the most deliberate thing on the floor`);
+  // and the spread has to be real, or every gait is the same gait
+  assert(rates.size >= 8, `only ${rates.size} distinct cadences across 30 people`);
+
+  // p.phase is tied to ground speed now; a fixed rate would undo it silently
+  const fast = ppl.filter(p => !p.boss).sort((a, b) => b.speed - a.speed)[0];
+  for (const p of [boss, fast]) { p.state = 'walk'; p.phase = 0; p.path = null; }
+  Sim.step(1);
+  assert(fast.phase > boss.phase * 1.15,
+    `phase advanced ${fast.phase.toFixed(2)} for the fastest walker and ` +
+    `${boss.phase.toFixed(2)} for the boss — p.phase is back on a fixed rate`);
+});
+
 /* ---------------------------------------------------------------- done --- */
 if (FAILS.length) {
   console.log('\n%d check(s) failed: %s', FAILS.length, FAILS.join(', '));

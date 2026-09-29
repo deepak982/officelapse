@@ -176,7 +176,12 @@ function personFor(e) {
     gesture: '',                        // tool-level one-shot for the 3D layer
     hue: boss ? deptHue(s.proj) : (h % 360),
     x: room.door.x + .5, y: room.door.y + .5,
-    path: null, pi: 0, dest: null, speed: 2.0 + (h % 40) / 100,
+    /* Tiles per second, and a tile is a metre, so this has to BE a walking speed:
+       the 3D layer plays its walk clip at speed / 0.975, so the old 2.00-2.39 ran the
+       whole office at 2.45x. The boss's band sits strictly below everyone else's, not
+       at a multiple of it — a gait you can pick out of a room has to be the slowest. */
+    path: null, pi: 0, dest: null,
+    speed: boss ? .86 + (h % 14) / 100 : 1.06 + (h % 44) / 100,
     lane: ((h % 5) - 2) * .17,          // keep to your own side of the aisle
     state: 'walk', act: 'type', face: S, arriveFace: S,
     phase: (h % 628) / 100, bob: (h % 314) / 100,
@@ -392,7 +397,9 @@ function step(dt) {
       }
     }
 
-    p.phase += dt * (p.state === 'walk' ? 8.5 : 2.6);
+    /* Both views swing a leg on sin(p.phase), so this is tied to ground speed, not a
+       fixed rate: the clip covers 1.3 u in two steps, so pi per .65 u = 4.83 rad/u. */
+    p.phase += dt * (p.state === 'walk' ? p.speed * 4.83 : 2.6);
     p.bob += dt * 1.9;
 
     if (p.state === 'walk' && p.path) {

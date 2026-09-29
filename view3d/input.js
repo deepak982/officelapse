@@ -1,17 +1,9 @@
 /* input.js — hover and click for the 3D view.
-
-   The 2D canvas has had a docked hover card and click-to-enter-a-room since the
-   start; this gives the 3D view the same ones. It deliberately reuses office.js's
-   tipFor / tipForAmenity / focusRoom rather than re-deriving any of it, so the two
-   views can never disagree about what a room or a person says. Those are top-level
-   function declarations in a classic script, so they are on globalThis.
-
-   Hit-testing is two different jobs. Rooms and facilities are flat, so one
-   ray/ground-plane intersection gives the tile under the cursor and the rest is a
-   rectangle test — no mesh raycasting needed. People are 1.8 units tall, so a
-   ground hit under the cursor is not where they are standing when you point at
-   someone's head; they are projected to the screen instead and tested there, the
-   same way office.js does it. */
+   Reuses office.js's tipFor / tipForAmenity / focusRoom (classic-script globals) so
+   the two views cannot disagree about what a room says.
+   Rooms and facilities are flat: one ray against the ground plane gives the tile.
+   People are 1.8 units tall, so they are projected to the screen and tested there —
+   a ground hit under the cursor is a tile behind where they stand. */
 import * as THREE from '../vendor/three.module.js';
 
 const GROUND = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);

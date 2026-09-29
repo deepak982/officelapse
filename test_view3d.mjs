@@ -5,15 +5,19 @@
    only two entry points this suite never calls. Everything else in view3d/ is pure
    or only needs three.js's CPU side, and that is where the bugs are — geometry per
    prop type and footprint, which wall a picture hangs on, which way a chair faces,
-   the camera basis, the reconciliation of scene against world, and the LOD rule.
+   the camera basis, the reconciliation of scene against world, the LOD rule, the walk
+   rate against the clip's baked stride, and the variety 135 people are built from.
 
-   Three things are pulled out of their modules rather than reimplemented:
+   Four things are pulled out of their modules rather than reimplemented:
      - scene.js's build/sync helpers are sliced out of the shipped source and run
        with fake batches. Reimplementing them here would test this file, not that one.
      - characters.js is driven through its real createCharacters()/sync() surface,
        with the real rig parsed from the .glb, so SkeletonUtils.clone is exercised.
      - office.js is evaluated in a vm with a stub 2D context and its drawPerson
        replaced by a recorder, so section X compares the two views' OWN answers.
+     - every measured number (the clip's baked stride, walkRef, the rig's heights)
+       comes from assets/manifest.json or the live options object. A literal copied
+       into this file is how three files drift apart and both suites keep passing.
 
    It is an .mjs because view3d/ is ES modules; floor.js / sim.js / office.js are
    plain scripts and are loaded the way each of them expects.
@@ -28,8 +32,10 @@ import { createRequire } from 'node:module';
 import * as THREE from './vendor/three.module.js';
 import { GLTFLoader } from './vendor/GLTFLoader.js';
 import * as Props from './view3d/props.js';
-import { MAT, COL, deptColor, amColor, plateMaterial, DIM, NEUTRAL } from './view3d/materials.js';
-import { createCharacters, chooseFull, CLIP_FOR, GESTURE_KEYS } from './view3d/characters.js';
+import { MAT, COL, deptColor, amColor, plateMaterial, personPalette, DIM, NEUTRAL }
+  from './view3d/materials.js';
+import { createCharacters, chooseFull, buildOf, walkScale, CLIP_FOR, GESTURE_KEYS }
+  from './view3d/characters.js';
 
 /* A second, independent props.js: it shouts once per unknown type per module
    instance, so probing the same type twice through one instance is silent. */
@@ -226,6 +232,64 @@ await check('P7', 'H.seat, H.desk and H.wall are the measured values, not drifte
   }
   assert(Math.abs(top - Props.H.seatBack) < 1e-6, `chair tops at ${top}, not H.seatBack`);
   assert(bottom > -1e-6, 'chair legs go through the floor');
+});
+
+/* P1 walks the CONTRACT vocabulary, so a type added to props.js but not to the
+   contract would be built by nobody and tested by nobody. Keys come off the shipped
+   source because a list written here drifts the moment somebody adds a prop. */
+await check('P8', 'every type props.js implements is one P1 actually builds', () => {
+  const src = readFileSync(new URL('./view3d/props.js', import.meta.url), 'utf8');
+  const from = src.indexOf('const BUILD = {');
+  assert(from >= 0, 'props.js no longer declares a BUILD table');
+  const body = src.slice(from, src.indexOf('\n};', from));
+  /* one entry per line at two-space indent: `name(w, h) {` or `name: ...` */
+  const keys = [...body.matchAll(/^ {2}([a-z][a-z0-9]*)\s*[:(]/gm)].map(m => m[1]);
+  /* plus aliases assigned after the table, e.g. BUILD.board = BUILD.whiteboard */
+  for (const m of src.matchAll(/^BUILD\.([a-z][a-z0-9]*)\s*=/gm)) keys.push(m[1]);
+  assert(keys.length > 20, `only ${keys.length} BUILD entries parsed — the shape changed`);
+  const covered = new Set(VOCAB.concat([...Props.WALL_DECO]));
+  const untested = keys.filter(k => !covered.has(k));
+  assert.deepStrictEqual(untested, [],
+    'props.js implements these and nothing builds them at five footprints: ' +
+    untested.join(' ') + ' — add them to VOCAB here, and to the contract');
+  console.log('        %d BUILD entries, all inside the vocabulary P1 sweeps', keys.length);
+});
+
+/* Clutter is a second geometry table, so it needs P1's guarantees again. One bucket
+   per piece is the promise that a mug costs one draw call for the whole floor. */
+await check('P9', 'every clutter piece is one bucket, resting on its own origin', () => {
+  const src = readFileSync(new URL('./view3d/props.js', import.meta.url), 'utf8');
+  const from = src.indexOf('const CLUTTER = {');
+  assert(from >= 0, 'props.js no longer declares a CLUTTER table');
+  const body = src.slice(from, src.indexOf('\n};', from));
+  const types = [...body.matchAll(/^ {2}([a-z][a-z0-9]*)\s*[:(]/gm)].map(m => m[1]);
+  assert(types.length >= 4, `only ${types.length} clutter types parsed — the shape changed`);
+  shouts = [];
+  for (const t of types) {
+    const bs = Props.buildClutter(t);
+    assert.strictEqual(bs.length, 1,
+      `${t} merges into ${bs.length} buckets — one piece must be one draw call for the ` +
+      'whole floor, or the vocabulary costs a call per material per type');
+    const g = bs[0].geometry;
+    const n = g.attributes.position.count;
+    assert(n > 0 && n % 3 === 0, `${t} vertex count ${n} is not whole triangles`);
+    assert.strictEqual(g.attributes.color.count, n, `${t} colour attr mismatch`);
+    assert.strictEqual(g.attributes.normal.count, n, `${t} normal attr mismatch`);
+    assert(g.boundingSphere && isFinite(g.boundingSphere.radius), `${t} bounds are not finite`);
+    g.computeBoundingBox();
+    const bb = g.boundingBox;
+    assert(bb.min.y > -1e-6, `${t} dips to y=${bb.min.y.toFixed(3)} — the caller ` +
+      'translates to the surface, so it would sink into it');
+    // desk slots are .3 apart; the jacket is tile-framed like a chair, not centred
+    const r = Math.max(bb.max.x, bb.max.z, -bb.min.x, -bb.min.z);
+    if (t !== 'jacket') assert(r < 0.25,
+      `${t} reaches ${r.toFixed(3)} from its own origin — it will hang off the desk`);
+    else assert(bb.min.x >= -1e-6 && bb.max.x <= 1 + 1e-6 &&
+                bb.min.z >= -1e-6 && bb.max.z <= 1 + 1e-6,
+      'the jacket is tile-framed and must stay inside its own tile');
+  }
+  assert.strictEqual(shouts.length, 0, 'props.js shouted: ' + shouts.join(' | '));
+  console.log('        %d clutter types, one bucket each: %s', types.length, types.join(' '));
 });
 
 /* ======================================================= N. negative props === */
@@ -787,9 +851,124 @@ await vcheck('V12', 'zero rooms, one room and 135 teammates all reconcile', () =
     oneRoom, V.made.get('glow').items.length);
 });
 
+/* Everything static, twice, instance for instance. Deliberately blind to what the
+   props are, so new clutter is covered without editing this. The scrub bar rebuilds
+   the floor from scratch, so one Math.random() in here redecorates every drag. */
+await vcheck('V13', 'the static world builds byte-identically twice — no random clutter', () => {
+  const build = () => {
+    V.reset();
+    const F = freshWorld([['s1', 'alpha'], ['s2', 'alpha'], ['s3', 'beta']]);
+    for (const a of F.amenities) V.buildFacility(a, Floor);
+    for (const sid in F.rooms) V.buildRoom(F.rooms[sid], Sim, Floor);
+    V.syncDepts(F, Sim);
+    return V.pushed.map(it =>
+      it.key + '|' + it.m.toArray().map(v => +v.toFixed(6)).join(',') +
+      '|' + it.c.getHexString()).join('\n');
+  };
+  const a = build(), b = build();
+  assert(a.length > 0, 'nothing was built at all');
+  assert.strictEqual(a, b,
+    'two builds of the same floor differ — placement is not a pure function of the ' +
+    'floor, so a scrub back to the same clock redecorates the office');
+  // and the comparison discriminates: a different floor must not compare equal
+  V.reset();
+  const other = freshWorld([['s1', 'alpha'], ['s2', 'beta'], ['s3', 'beta'], ['s4', 'beta']]);
+  for (const x of other.amenities) V.buildFacility(x, Floor);
+  for (const sid in other.rooms) V.buildRoom(other.rooms[sid], Sim, Floor);
+  assert.notStrictEqual(V.pushed.length, a.split('\n').length,
+    'a four-room floor built the same instances as a three-room one — this check ' +
+    'compares nothing and would pass whatever placement did');
+  console.log('        %d static instances, identical across two builds', a.split('\n').length);
+});
+
+/* "One draw call per prop type per FLOOR, not per room" — the rule that lets this
+   renderer hold at 135 people. An InstancedMesh is one call, so batches are calls. */
+await vcheck('V14', 'draw calls do not scale with room count', () => {
+  const build = n => {
+    V.reset();
+    const F = freshWorld(Array.from({ length: n }, (_, i) => ['s' + i, 'alpha']));
+    for (const a of F.amenities) V.buildFacility(a, Floor);
+    for (const sid in F.rooms) V.buildRoom(F.rooms[sid], Sim, Floor);
+    V.syncDepts(F, Sim);
+    return { calls: new Set(V.pushed.map(it => it.key)), rooms: V.roomIdx.size };
+  };
+  const one = build(1), many = build(8);
+  assert.strictEqual(one.rooms, 1);
+  assert.strictEqual(many.rooms, 8, 'the fixture did not open eight rooms');
+  assert.deepStrictEqual([...many.calls].sort(), [...one.calls].sort(),
+    'eight rooms draw batches one room does not: ' +
+    [...many.calls].filter(k => !one.calls.has(k)).join(' '));
+  // set equality catches a per-room key already, but only if no key carries a sid
+  const named = [...many.calls].filter(k => /s[0-7]\b/.test(k));
+  assert.deepStrictEqual(named, [],
+    'a batch key names a room: ' + named.join(' ') + ' — one geometry per type per ' +
+    'floor is the rule, and a per-room key is 8x the draw calls at eight sessions');
+  console.log('        %d draw calls, the same set for 1 room and for 8', many.calls.size);
+});
+
+/* The clutter equivalent of V11: a mug over bare carpet is the same bug as a lit
+   monitor over a hot-desk stand-in. Surface heights are MEASURED off the geometry
+   props.js builds, so a height hardcoded in scene.js instead of taken from Props.H
+   fails here. One rect at a time, so every cl| instance belongs to the rect built. */
+await vcheck('V15', 'every piece of clutter rests on furniture that is really there', () => {
+  const F = freshWorld([['s1', 'alpha']]);
+  const room = F.rooms.s1;
+  const topOf = (pr) => {
+    let top = -Infinity;
+    for (const b of Props.buildProp(pr.type, pr.w, pr.h, { art: pr.art })) {
+      b.geometry.computeBoundingBox();
+      top = Math.max(top, b.geometry.boundingBox.max.y);
+    }
+    return top;
+  };
+  const jobs = F.amenities.map(a => ({ rect: a, desks: a.desks || [], build: () => V.buildFacility(a, Floor) }));
+  jobs.push({ rect: asRect(room), desks: room.desks.concat([room.boss]),
+              boss: room.boss, build: () => V.buildRoom(room, Sim, Floor) });
+  let placed = 0;
+  const kinds = new Set();
+  for (const job of jobs) {
+    V.reset();
+    job.build();
+    for (const it of V.pushed) {
+      if (!String(it.key).startsWith('cl|')) continue;
+      const type = it.key.slice(3), g = V.at(it);
+      placed++; kinds.add(type);
+      // a jacket hangs on a chair back, placed tile-cornered at y=0
+      if (type === 'jacket') {
+        assert(job.rect.props.some(pr => pr.type === 'chair' &&
+          Math.abs(g.x - (pr.x + 0.5)) < 0.75 && Math.abs(g.z - (pr.y + 0.5)) < 0.75),
+          `a jacket at ${g.x.toFixed(2)},${g.z.toFixed(2)} hangs on no chair`);
+        continue;
+      }
+      const d = job.desks.find(q => q && g.x > q.x - 0.1 &&
+        g.x < q.x + (q === job.boss ? 2.1 : 1.1) && g.z > q.y - 0.1 && g.z < q.y + 1.1);
+      if (d) {
+        assert(Math.abs(g.y - Props.H.desk) < 0.011,
+          `${type} on the desk at ${d.x},${d.y} floats at y=${g.y.toFixed(3)}, ` +
+          `and a desk top is ${Props.H.desk}`);
+        continue;
+      }
+      const pr = job.rect.props.find(q => g.x > q.x - 1e-6 && g.x < q.x + q.w + 1e-6 &&
+        g.z > q.y - 1e-6 && g.z < q.y + q.h + 1e-6 &&
+        !Props.SKIP.has(q.type) && !Props.WALL_DECO.has(q.type));
+      assert(pr, `a ${type} at ${g.x.toFixed(2)},${g.z.toFixed(2)} in the ` +
+        `${job.rect.kind || 'room'} sits on bare carpet`);
+      const top = topOf(pr);
+      // .13 below is the bin: litter drops under the rim so it pokes out, not hovers
+      assert(g.y <= top + 0.02 && g.y > top - 0.13,
+        `${type} on a ${pr.type} sits at y=${g.y.toFixed(3)} and that ${pr.type}'s top ` +
+        `face measures ${top.toFixed(3)} — the height is not coming from the geometry`);
+    }
+  }
+  assert(placed > 30, `only ${placed} pieces of clutter on the whole floor`);
+  console.log('        %d pieces placed, %d types, every one on real furniture',
+    placed, kinds.size);
+});
+
 /* ========================================================== K. characters === */
 /* The real rig, parsed from the .glb without a browser. characters.js's own
    selfTest() covers the pure helpers; nothing here repeats it. */
+const CHARS_SRC = readFileSync(new URL('./view3d/characters.js', import.meta.url), 'utf8');
 const RIG = await (async () => {
   try {
     const loader = new GLTFLoader();
@@ -799,9 +978,14 @@ const RIG = await (async () => {
     });
     const man = JSON.parse(readFileSync(new URL('./assets/manifest.json', import.meta.url), 'utf8'));
     const rig = await parse(man.rig.file);
+    /* the clip -> extraClips wiring is read out of characters.js rather than written
+       here: load()'s browser path picks the variant sources itself, and a list copied
+       into this fixture would keep loading walk2 from the old file while the real
+       layer asked for a new one — the fixture would pass and the app would be one
+       clip short. The regex mirrors `wanted.<key> = man.extraClips.<name>`. */
     const want = { ...man.clips, ...man.gestures };
-    if (man.extraClips) Object.assign(want, { walk2: man.extraClips.walk_formal,
-      idle2: man.extraClips.idle_foldarms, nod: man.extraClips.nod });
+    for (const m of CHARS_SRC.matchAll(/wanted\.(\w+)\s*=\s*man\.extraClips\.(\w+)/g))
+      want[m[1]] = (man.extraClips || {})[m[2]];
     const clips = {};
     for (const [k, spec] of Object.entries(want)) {
       if (!spec || !spec.file) continue;
@@ -957,6 +1141,343 @@ await check('K8', 'a frame that lands after dispose() is ignored, not a crash', 
   c.dispose();
   c.sync([person('a'), person('b')], 1 / 60);     // must not throw
   c.dispose();                                     // twice is allowed too
+});
+
+/* =============================================== M. the walk, end to end === */
+/* The office read as a robot because sim.js walked at 2.00-2.39 tiles/s against a clip
+   whose baked stride covers 0.975 u/s — 2.05-2.45x playback. Three numbers in three
+   files have to agree, and each was a literal in its own file, so any two could drift
+   and both suites would still pass. These hold the RELATIONSHIP: stride from the
+   manifest, walkRef from live options, ground speed from a real sim, walkScale itself.
+   The only thing written here is the band a human stride can occupy. */
+
+const MANIFEST = JSON.parse(
+  readFileSync(new URL('./assets/manifest.json', import.meta.url), 'utf8'));
+
+/* freshSim gives every event an agent id, so it never opens a boss (sim.js: `!e.aid`).
+   Appended after the fact, so every other fixture keeps the roster it expects. */
+function addBoss() {
+  St.events.push({ t: 100, sid: 's1', aid: null, kind: 'tool', tool: 'Read',
+                   say: 'ship it', seq: 1e6 });
+  for (let i = 0; i < 4; i++) Sim.advance(1 / 60);
+  const boss = Object.values(St.people).find(p => p.boss);
+  assert(boss, 'sim.js no longer puts a boss on the floor for an event with no agent id');
+  return boss;
+}
+
+await check('M1', 'walkRef is the measured stride of every clip the layer walks on', () => {
+  const o = createCharacters().options;
+  // every clip playable as `walk` runs at the one walkRef, so they must share a stride
+  const strides = [['clips.walk', MANIFEST.clips.walk]];
+  for (const m of CHARS_SRC.matchAll(/wanted\.(walk\d+)\s*=\s*man\.extraClips\.(\w+)/g))
+    strides.push(['extraClips.' + m[2], (MANIFEST.extraClips || {})[m[2]]]);
+  assert(strides.length > 1, 'characters.js no longer loads a second walk — variety is gone');
+  for (const [where, spec] of strides) {
+    assert(spec && spec.rootMotion, `${where} has no measured rootMotion in the manifest`);
+    assert.strictEqual(spec.rootMotion.unitsPerSecond, o.walkRef,
+      `${where} strides at ${spec.rootMotion.unitsPerSecond} u/s and characters.js plays ` +
+      `every walk against walkRef ${o.walkRef} — one of the two walks will skate`);
+  }
+  assert.strictEqual(walkScale(o.walkRef, o.walkRef), 1,
+    'a person walking at exactly the baked stride must play the clip at 1x');
+  console.log('        %d walk clips, all baked at %s u/s', strides.length, o.walkRef);
+});
+
+await check('M2', 'every speed the sim hands out plays the walk at a human cadence', () => {
+  // 1.6x is where a walk stops reading as a walk; the old 2.00-2.39 sat at 2.05-2.45x
+  const LO = 0.85, HI = 1.60;
+  const o = createCharacters().options;
+  freshSim(60, 100);
+  const boss = addBoss();
+  const ppl = Object.values(St.people);
+  assert.strictEqual(ppl.length, 61, 'the fixture lost people');
+  const rates = new Set();
+  let slowestMate = Infinity;
+  for (const p of ppl) {
+    const rate = walkScale(p.speed, o.walkRef);
+    assert(rate > LO && rate < HI,
+      `${p.key} walks at ${p.speed.toFixed(2)} tiles/s, i.e. the clip at ` +
+      `${rate.toFixed(2)}x — outside ${LO}-${HI}x, which is not a walk`);
+    // walkScale's clamp is an outlier guard: a speed that reaches it is hidden, not played
+    assert(rate > 0.36 && rate < 2.59, `${p.key} is riding walkScale's clamp`);
+    rates.add(rate.toFixed(3));
+    if (!p.boss) slowestMate = Math.min(slowestMate, p.speed);
+  }
+  assert(walkScale(boss.speed, o.walkRef) < walkScale(slowestMate, o.walkRef),
+    `the boss plays the walk at ${walkScale(boss.speed, o.walkRef).toFixed(2)}x and the ` +
+    `slowest teammate at ${walkScale(slowestMate, o.walkRef).toFixed(2)}x — a gait you ` +
+    'can pick out of a room only works if it is always the slowest one on the floor');
+  assert(rates.size >= 8, `only ${rates.size} distinct cadences across 61 people`);
+  console.log('        %d cadences, %s-%sx, boss %sx', rates.size,
+    Math.min(...[...rates].map(Number)).toFixed(2),
+    Math.max(...[...rates].map(Number)).toFixed(2),
+    walkScale(boss.speed, o.walkRef).toFixed(2));
+});
+
+await check('M3', 'the speed the feet actually see stays inside a human band', () => {
+  /* M2 pins the nominal speed; this pins what the layer measures. a.ground is the
+     per-frame step low-passed, and the lane offset, the shove and the slow-down into a
+     waypoint all move it — so it is averaged over a journey, which is where the
+     low-pass lands. Wider than M2's band on purpose: 0.6-2.0x is still a walk. */
+  const LO = 0.6, HI = 2.0;
+  const o = createCharacters().options;
+  freshSim(60, 100, 0);                 // 1x, so the clock and the frames agree
+  const acc = new Map(), prev = new Map();
+  for (let i = 0; i < 4000; i++) {
+    for (const p of Object.values(St.people)) prev.set(p.key, [p.x, p.y, p.state]);
+    Sim.advance(1 / 60);
+    for (const p of Object.values(St.people)) {
+      const q = prev.get(p.key);
+      if (!q || q[2] !== 'walk' || p.state !== 'walk') continue;
+      const d = Math.hypot(p.x - q[0], p.y - q[1]);
+      if (d > 1.5) continue;             // a scrub or a respawn, not a step
+      let a = acc.get(p.key);
+      if (!a) acc.set(p.key, a = { d: 0, t: 0, boss: p.boss });
+      a.d += d; a.t += 1 / 60;
+    }
+  }
+  const rates = [];
+  for (const [key, a] of acc) {
+    if (a.t < 1) continue;               // too short to average anything
+    const rate = walkScale(a.d / a.t, o.walkRef);
+    assert(rate > LO && rate < HI,
+      `${key} covers ${(a.d / a.t).toFixed(2)} tiles/s over ${a.t.toFixed(1)}s of ` +
+      `walking, i.e. the clip at ${rate.toFixed(2)}x — outside ${LO}-${HI}x`);
+    rates.push(rate);
+  }
+  assert(rates.length > 20, `only ${rates.length} journeys long enough to measure`);
+  console.log('        %d journeys, %s-%sx measured off the floor', rates.length,
+    Math.min(...rates).toFixed(2), Math.max(...rates).toFixed(2));
+});
+
+/* ========================================= D. variety, and it replays same === */
+/* 135 people out of one rig: the variety has to be visible AND a pure function of
+   p.h, or the scrub bar redecorates the office on every drag. Read off the instance
+   buffers, the only place the cheap LOD's 95 stand-ins are observable. */
+
+/* the three InstancedMeshes that carry a person, as "scale#colour" per instance */
+function bodyRows(chars) {
+  const m = new THREE.Matrix4(), col = new THREE.Color(), s = new THREE.Vector3();
+  const out = new Map();
+  chars.group.traverse(o => {
+    if (!o.isInstancedMesh || !o.instanceColor) return;
+    const rows = [];
+    for (let i = 0; i < o.count; i++) {
+      o.getMatrixAt(i, m);
+      s.setFromMatrixScale(m);
+      o.getColorAt(i, col);
+      rows.push(s.toArray().map(v => v.toFixed(5)).join(',') + '#' + col.getHexString());
+    }
+    out.set(o.geometry.type, rows);
+  });
+  return out;
+}
+
+await check('D1', 'nothing in the 3D layer or the sim reaches for Math.random', () => {
+  // behaviour cannot prove it: a Math.random() on a branch no fixture takes passes D3
+  const files = ['sim.js', 'floor.js', 'view3d/characters.js', 'view3d/materials.js',
+                 'view3d/props.js', 'view3d/scene.js'];
+  const hits = [];
+  for (const f of files) {
+    /* Comments are blanked, not stripped, so line numbers stay true. Every one of these
+       files promises in prose not to use Math.random() — raw text finds the promises. */
+    let inBlock = false;
+    readFileSync(new URL('./' + f, import.meta.url), 'utf8').split('\n').forEach((raw, i) => {
+      let line = raw;
+      if (inBlock) {
+        const e = line.indexOf('*/');
+        if (e < 0) return;
+        line = line.slice(e + 2); inBlock = false;
+      }
+      line = line.replace(/\/\*(?:(?!\*\/)[\s\S])*\*\//g, ' ');
+      const b = line.indexOf('/*');
+      if (b >= 0) { inBlock = true; line = line.slice(0, b); }
+      line = line.replace(/\/\/.*$/, '');
+      if (/Math\.random\s*\(/.test(line)) hits.push(`${f}:${i + 1}`);
+      // a wall clock is the same hazard: it cannot be replayed either
+      if (/\b(Date\.now|performance\.now)\s*\(/.test(line) && f !== 'sim.js')
+        hits.push(`${f}:${i + 1} (wall clock)`);
+    });
+  }
+  assert.deepStrictEqual(hits, [],
+    'a replay cannot survive these: ' + hits.join(' ') +
+    ' — every per-person choice must be a bit slice of p.h');
+});
+
+await check('D2', '135 people are 135 different people, not 95 identical capsules', () => {
+  const c = createCharacters();
+  try {
+    const ppl = freshSim(135, 100).sort((a, b) => (a.key < b.key ? -1 : 1));
+    const got = c.sync(ppl, 1 / 60);
+    assert.strictEqual(got.cheap, 135, 'the fixture did not land on the cheap LOD');
+    const rows = bodyRows(c);
+    assert(rows.size >= 3,
+      'the stand-in is back to one primitive — legs, torso and head are what ' +
+      'separates a person from a chess pawn at this distance');
+    // height and width come off p.h: one value across 135 people is the reported bug
+    const scales = new Set();
+    for (const rowset of rows.values()) for (const r of rowset) scales.add(r.split('#')[0]);
+    assert(scales.size >= 20,
+      `${scales.size} distinct builds across 135 people — the hash slice is unmixed ` +
+      'again, which dresses a whole room as one body');
+    // each of the three tones has to vary on its own; one trouser tone is a uniform
+    for (const [geo, rowset] of rows) {
+      const tones = new Set(rowset.map(r => r.split('#')[1]));
+      assert(tones.size >= 4, `${geo} paints ${tones.size} tones across 135 people`);
+    }
+    // and the pairing has to vary, or it is 135 people out of a handful of outfits
+    const whole = new Set();
+    const n = rows.get('CapsuleGeometry').length;
+    for (let i = 0; i < n; i++)
+      whole.add([...rows.values()].map(r => r[i]).join('/'));
+    assert(whole.size >= 120,
+      `${whole.size} distinct people among 135 — build and palette are correlated`);
+    /* X8 pins ONE person's albedo against office.js's 50% lightness, and the palette now
+       deals a four-step ladder — so a new step could break that contract for some people
+       and not for the one X8 samples. Every step a teammate can be dealt, busy or idle. */
+    const hsl = {};
+    for (const idle of [false, true]) {
+      for (let i = 0; i < 400; i++) {
+        personPalette(199, Math.imul(i + 1, 2246822519) >>> 0, idle, false)
+          .shirt.getHSL(hsl, THREE.SRGBColorSpace);
+        assert(Math.abs(hsl.l - 0.50) < 0.12,
+          `a shirt step reads at sRGB lightness ${hsl.l.toFixed(3)}; office.js draws a ` +
+          'teammate at 50% and X8 allows +/-.12 — this step is outside it');
+      }
+    }
+    console.log('        135 people: %d builds, %d whole-person combinations',
+      scales.size, whole.size);
+  } finally { c.dispose(); }
+});
+
+await check('D3', 'the same clock replays the same people, down to the instance buffer', () => {
+  /* Z5 pins that the sim replays the same POSITIONS; this pins that the layer then
+     dresses them identically. A new layer each time, so no cache carries over. */
+  const replay = (T) => {
+    Sim.rebuild(T);
+    St.clock = T;
+    for (let i = 0; i < 8; i++) Sim.advance(1 / 60);
+    const c = createCharacters();
+    try {
+      const ppl = Object.values(St.people).sort((a, b) => (a.key < b.key ? -1 : 1));
+      c.sync(ppl, 1 / 60);
+      return { n: ppl.length, rows: [...bodyRows(c)].map(([g, r]) => g + ':' + r.join('|')).join('\n') };
+    } finally { c.dispose(); }
+  };
+  freshSim(135, 100);
+  const a = replay(200), b = replay(200);
+  assert(a.n > 20, `the replay put only ${a.n} people back`);
+  assert.strictEqual(b.n, a.n, 'two replays of the same clock produced different rosters');
+  assert.strictEqual(a.rows, b.rows,
+    'two replays of the same clock dressed the same people differently — something ' +
+    'in the variety is not a pure function of p.h');
+  // and the comparison discriminates: a different roster must not compare equal
+  freshSim(40, 100);
+  const few = replay(200);
+  assert.notStrictEqual(few.rows, a.rows,
+    'a 40-person floor produced the same rows as a 135-person one — this check ' +
+    'compares nothing and would pass whatever the variety did');
+  console.log('        %d people, identical across two replays to clock 200', a.n);
+});
+
+await check('D4', 'every clip variant a person can be dealt actually exists', async () => {
+  /* setClip falls back to the default when the rig lacks a variant, so a missing one
+     is silent — the office just goes back to one pose. Variants come from buildOf
+     itself, not a list here, so a third walk is covered the day it lands. */
+  assert(!RIG.error, 'the rig could not be parsed: ' + RIG.error);
+  const c = createCharacters();
+  try {
+    await c.load(RIG);
+    assert.strictEqual(c.info.mode, 'rig', 'the rig did not take: ' + c.info.notes.join('; '));
+    const dealt = { walk: new Set(), idle: new Set() };
+    for (let i = 0; i < 2000; i++) {
+      const v = buildOf(Math.imul(i + 1, 2246822519) >>> 0, false, c.options).variant;
+      for (const k in dealt) dealt[k].add(v[k]);
+    }
+    const bossV = buildOf(12345, true, c.options).variant;
+    for (const k in dealt) dealt[k].add(bossV[k]);
+    const missing = [];
+    for (const [key, set] of Object.entries(dealt))
+      for (const v of set) if (!c.info.clips[key + v]) missing.push(key + v);
+    assert.deepStrictEqual(missing, [],
+      'buildOf deals these and the rig carries no clip for them: ' + missing.join(' ') +
+      ' — everyone dealt one silently falls back to the default pose');
+    assert(dealt.walk.size >= 2 && dealt.idle.size >= 3,
+      `only ${dealt.walk.size} walks and ${dealt.idle.size} standing idles are ever ` +
+      'dealt — a corridor is one pose and a lounge is a rack of statues');
+    console.log('        walks %s, idles %s, all resolved on the real rig',
+      [...dealt.walk].map(v => 'walk' + v).join('/'),
+      [...dealt.idle].map(v => 'idle' + v).join('/'));
+  } finally { c.dispose(); }
+});
+
+/* ============================================================= B. the boss === */
+/* The only difference used to be bossScale 1.06 — four pixels at office zoom. Each cue
+   is pinned separately, so losing one cannot hide behind the others. */
+
+await check('B1', 'a boss is a different build, a different gait and different clips', () => {
+  const c = createCharacters();
+  try {
+    const o = c.options;
+    freshSim(60, 100);
+    const boss = addBoss();
+    const ppl = Object.values(St.people);
+    // the SAME hash as a teammate, so every difference is the flag, not the draw
+    const asBoss = buildOf(boss.h, true, o), asMate = buildOf(boss.h, false, o);
+    assert(asBoss.hy > asMate.hy, 'the boss is not taller than the same person would be');
+    assert(asBoss.hw / asBoss.hy > asMate.hw / asMate.hy, 'and he is not broader either');
+    // fixed clips whatever his hash says, or the silhouette is not a rank
+    const dealt = new Set();
+    for (let i = 0; i < 500; i++)
+      dealt.add(JSON.stringify(buildOf(Math.imul(i + 1, 2246822519) >>> 0, true, o).variant));
+    assert.strictEqual(dealt.size, 1,
+      'a boss\'s clips are drawn from his hash — every boss has to read the same or ' +
+      'the silhouette is not a rank');
+    const mateVariants = new Set();
+    for (let i = 0; i < 500; i++)
+      mateVariants.add(JSON.stringify(buildOf(Math.imul(i + 1, 2246822519) >>> 0, false, o).variant));
+    assert(mateVariants.size > 1, 'teammates no longer vary their clips');
+    /* gait: strictly the slowest thing on the floor, not a multiple of a teammate's */
+    for (const p of ppl) if (!p.boss)
+      assert(boss.speed < p.speed,
+        `${p.key} walks at ${p.speed.toFixed(2)} and the boss at ${boss.speed.toFixed(2)}`);
+    console.log('        boss %sx tall, %s%% broader, walk %s idle %s, %s tiles/s',
+      (asBoss.hy / asMate.hy).toFixed(3),
+      (((asBoss.hw / asBoss.hy) / (asMate.hw / asMate.hy) - 1) * 100).toFixed(1),
+      JSON.parse([...dealt][0]).walk || '(default)',
+      JSON.parse([...dealt][0]).idle, boss.speed.toFixed(2));
+  } finally { c.dispose(); }
+});
+
+await check('B2', 'the boss wears his own colour, outside every teammate shirt', () => {
+  /* The jacket lands before a name plate is legible, so it has to sit OUTSIDE the
+     range teammates draw from, not be another draw from it. sRGB, like X8. */
+  const hsl = {}, read = c => { c.getHSL(hsl, THREE.SRGBColorSpace); return { ...hsl }; };
+  const hue = 199;
+  const mates = [];
+  for (let i = 0; i < 400; i++)
+    mates.push(read(personPalette(hue, Math.imul(i + 1, 2246822519) >>> 0, false, false).shirt));
+  const boss = read(personPalette(hue, 12345, false, true).shirt);
+  assert(boss.l < Math.min(...mates.map(m => m.l)) - 0.05,
+    `the boss's shirt is at lightness ${boss.l.toFixed(2)} and teammates go down to ` +
+    `${Math.min(...mates.map(m => m.l)).toFixed(2)} — a jacket has to read darker`);
+  assert(boss.s > Math.max(...mates.map(m => m.s)) + 0.05,
+    'the boss\'s shirt is no more saturated than a teammate\'s');
+  // trousers too, or the only cue is gone the moment he sits down
+  assert.notStrictEqual(personPalette(hue, 12345, false, true).trouser.getHexString(),
+    personPalette(hue, 12345, false, false).trouser.getHexString(),
+    'the boss wears the same trousers as the same person would as a teammate');
+  /* and the cue must survive going idle, which darkens everybody */
+  const bossIdle = read(personPalette(hue, 12345, true, true).shirt);
+  const mateIdle = [];
+  for (let i = 0; i < 400; i++)
+    mateIdle.push(read(personPalette(hue, Math.imul(i + 1, 2246822519) >>> 0, true, false).shirt));
+  assert(bossIdle.l < Math.min(...mateIdle.map(m => m.l)),
+    'an idle boss is no longer darker than an idle teammate — the cue dies at the cooler');
+  console.log('        jacket hsl(%d %d%% %d%%) against shirts %d-%d%% lightness',
+    Math.round(boss.h * 360), Math.round(boss.s * 100), Math.round(boss.l * 100),
+    Math.round(Math.min(...mates.map(m => m.l)) * 100),
+    Math.round(Math.max(...mates.map(m => m.l)) * 100));
 });
 
 /* ================================================== X. the two views agree === */
@@ -1435,10 +1956,10 @@ if (FAILS.length) {
 console.log('view3d ok');
 
 /* ============================== KNOWN GAPS ==================================
-   Six things the 3D layer does not handle. Each is CHARACTERISED above rather than
-   demanded: the check asserts what the code does today and fails with "GAP n is
-   fixed, delete this check" once it is fixed. None of them is reachable as a crash
-   on today's floor, which is why they are gaps and not failures.
+   All six original gaps have been fixed, and every one is now pinned above as a
+   POSITIVE guard that fails when the property breaks — not as a characterisation of
+   the bug. The history is kept because it is what stops someone deleting a check
+   they do not recognise; the "was GAP n" note above each one says which.
 
    1  props.js art(): `(x.art | 0) % COL.art.length` is negative for a negative
       index, and COL.art[-1] throws. floor.js only ever emits art 0..8, so nothing

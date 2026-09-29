@@ -65,12 +65,8 @@ function chair(x, y, dir) {
       15, '#333a4f', '#1f2431', '#272d3d');
 }
 
-/* state: 0 empty, 1 occupied, 2 active. Three, not a boolean, because a person sits
-   at their desk until GONE (900s) while activity only lasts IDLE (90s) — a binary
-   monitor leaves someone sitting at a dead screen for 810 of those seconds, which
-   reads as broken. Occupied is a muted slate, active the bright cyan plus the bloom;
-   the hue difference is what separates them at a glance, not the value. Matches the
-   3D view's rule exactly, and test_view3d.mjs X7 pins the two together. */
+/* 0 empty, 1 occupied, 2 active. Three because a person sits until GONE (900s) while
+   activity lasts IDLE (90s) — a boolean leaves them at a dead screen for 810 of them. */
 function drawDesk(d, state, big) {
   const on = state === 2;
   const w = big ? 1.7 : .98, dp = .76;
