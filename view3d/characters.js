@@ -44,6 +44,20 @@ import { personPalette, mixHash } from './materials.js';
 export const CLIP_FOR = {
   walk: 'walk', type: 'type', think: 'idle', file: 'search', meet: 'talk', leaving: 'walk',
 };
+/* Sitting is about where you ARE, not what you own: owning a desk while standing in
+   another room put 7 of 10 people in a chair-shaped pose 14-20 tiles from their chair.
+   A sofa in the lounge and a chair in the cafeteria are seats too, and somebody on a
+   break used to stand on the cushion. `desk.hot` is floor.js's overflow spot with no
+   desk built on it, and the sim parks a person on the seat tile's centre, seat + half. */
+const onSeat = (p, seats) => !!seats && seats.some(s =>
+  Math.abs(p.x - (s.x + 0.5)) < 0.75 && Math.abs(p.y - (s.y + 0.5)) < 0.75);
+
+export const deskSeated = p =>
+  p.state !== 'walk' && p.state !== 'leaving' && (
+    p.fac ? onSeat(p, p.fac.seats)
+          : (p.state === 'type' || p.state === 'think' || p.state === 'file') &&
+            !!p.desk && !p.desk.hot && onSeat(p, [p.desk.seat]));
+
 /* p.gesture -> clip key. sim.js maps the tool to these (Read -> point, ...). */
 export const GESTURE_KEYS = ['point', 'typefast', 'headscratch', 'handoff', 'lookup'];
 
@@ -108,6 +122,14 @@ const DEFAULTS = {
      clear the back of the cushion and still rest on its front face, without pushing a
      foot into the desk. selfTest holds the window; do not nudge it by eye. */
   sitFwd: 0.14,
+  /* where the typing pose puts the hands: the keyboard's top face, and how far in
+     front of the shoulder it sits. Both calibrated against what the hand MEASURES at
+     afterwards - the layer is additive, so aiming at a height does not land on it. */
+  deskY: 0.76,
+  deskReach: 0.40,    // measured: the hand gains exactly this much z, fingertips +0.15
+  fingerCurl: 0.30,     // resting curl, so a hand is not flat and splayed on the keys
+  fingerTap: 0.35,      // how far the tapping finger drops below that
+  curlSign: -1,       // measured: +1 bent the fingertips UP off the keys
   /* Measured: M_Joints is 8012 of the male rig's 13744 triangles (8197 of 14612 on the
      female), 91% of it finger balls, and not one of its 49 balls sits over empty
      M_Main — so hiding it opens no hole and loses no silhouette. It is also the
@@ -824,25 +846,70 @@ export function createCharacters(opts = {}) {
     const head = bone(BONES.head), neck = bone(BONES.neck);
     const foreL = bone(BONES.foreL), foreR = bone(BONES.foreR);
     const handL = bone(BONES.handL), handR = bone(BONES.handR);
-    const armR = bone(BONES.armR);
+    const armL = bone(BONES.armL), armR = bone(BONES.armR);
 
     /* desk: measured in the SEATED pose, because that is the pose it corrects.
        The clip rests the hands in the lap at y=0.644 and a desk is at ~0.73, so
        each forearm is swung until the hand reaches the surface, then pumped. */
-    if (clips.type && foreL && foreR && handL && handR) {
+    if (clips.type && foreL && foreR && handL && handR && armL && armR) {
       const right = withPose(clips.type, 0, () =>
         handR.getWorldPosition(V()).sub(handL.getWorldPosition(V())).setY(0).normalize());
       const fwd = new THREE.Vector3(0, 1, 0).cross(right);
-      const dl = withPose(clips.type, 0, () =>
-        aim(foreL, handL, handL.getWorldPosition(V()).add(fwd.clone().multiplyScalar(0.10)).setY(0.75), 1));
-      const dr = withPose(clips.type, 0, () =>
-        aim(foreR, handR, handR.getWorldPosition(V()).add(fwd.clone().multiplyScalar(0.10)).setY(0.75), 1));
+
+      /* Two bones, not one. Swinging the forearm alone can only rotate the hand about
+         the elbow, and the keyboard is further from the shoulder than the forearm is
+         long - which is why the old pose settled for nudging the lap hands 0.10 forward
+         and left them typing on air. Shoulder then elbow, three passes of CCD. */
+      const solve = (arm, fore, hand) => {
+        const qa = arm.quaternion.clone(), qf = fore.quaternion.clone();
+        const target = arm.getWorldPosition(V())
+          .add(fwd.clone().multiplyScalar(o.deskReach)).setY(o.deskY);
+        for (let i = 0; i < 3; i++) {
+          arm.quaternion.multiply(aim(arm, hand, target, 1));
+          arm.updateMatrixWorld(true);
+          fore.quaternion.multiply(aim(fore, hand, target, 1));
+          fore.updateMatrixWorld(true);
+        }
+        const da = qa.clone().invert().multiply(arm.quaternion);
+        const df = qf.clone().invert().multiply(fore.quaternion);
+        arm.quaternion.copy(qa); fore.quaternion.copy(qf);
+        arm.updateMatrixWorld(true); fore.updateMatrixWorld(true);
+        return [da, df];
+      };
+      const [al, dl] = withPose(clips.type, 0, () => solve(armL, foreL, handL));
+      const [ar, dr] = withPose(clips.type, 0, () => solve(armR, foreR, handR));
       const nod = head ? withPose(clips.type, 0, () => spin(head, right, 0.035 * o.pitchSign)) : null;
       const T = [0, 0.18, 0.36, 0.54, 0.72];
+
+      /* Fingers. The rig carries three joints per finger, so hands resting flat and
+         splayed on a keyboard were a choice, not a limit: curl them, then drop one
+         finger per beat so the tap travels across the hand instead of both hands
+         pumping together. */
+      const fingers = [];
+      ['l', 'r'].forEach((sideKey, si) => {
+        ['index', 'middle', 'ring', 'pinky'].forEach((f, fi) => {
+          ['01', '02'].forEach(j => {
+            const name = f + '_' + j + '_' + sideKey;
+            const b = bone(name);
+            if (!b) return;
+            const rest = j === '01' ? o.fingerCurl : o.fingerCurl * 1.5;
+            const rq = withPose(clips.type, 0, () => spin(b, right, rest * o.curlSign));
+            const dq = withPose(clips.type, 0, () =>
+              spin(b, right, (rest + o.fingerTap) * o.curlSign));
+            const beat = (fi + si * 2) % T.length;
+            fingers.push(qTrack(name + '.quaternion', T,
+              T.map((_, k) => (k === beat ? dq : rq))));
+          });
+        });
+      });
+
       clips.desk = additiveClip('desk', 0.72, [
-        qTrack(BONES.foreL + '.quaternion', T, [dl, part(dl, 0.86), dl, part(dl, 0.86), dl]),
-        qTrack(BONES.foreR + '.quaternion', T, [part(dr, 0.86), dr, part(dr, 0.86), dr, part(dr, 0.86)]),
+        qTrack(BONES.armL + '.quaternion', T, [al, part(al, 0.97), al, part(al, 0.97), al]),
+        qTrack(BONES.armR + '.quaternion', T, [ar, part(ar, 0.97), ar, part(ar, 0.97), ar]),
+        qTrack(BONES.foreL + '.quaternion', T, [dl, part(dl, 0.94), dl, part(dl, 0.94), dl]),
+        qTrack(BONES.foreR + '.quaternion', T, [part(dr, 0.94), dr, part(dr, 0.94), dr, part(dr, 0.94)]),
         nod && qTrack(BONES.head + '.quaternion', T, [I(), nod, I(), part(nod, -0.6), I()]),
+        ...fingers,
       ]);
     }
 
@@ -977,7 +1044,7 @@ export function createCharacters(opts = {}) {
 
   function makeAvatar(p) {
     return {
-      p, key: p.key, lod: 'none', gen: -1, h: hashOf(p),
+      p, key: p.key, lod: 'none', gen: -1, h: hashOf(p), deskOn: false,
       // decided once, and read by both LODs so nobody changes shape crossing over
       build: buildOf(hashOf(p), !!p.boss, o),
       root: null, mixer: null, acts: null, base: null, baseKey: '',
@@ -988,7 +1055,7 @@ export function createCharacters(opts = {}) {
       q: new THREE.Quaternion().setFromEuler(new THREE.Euler(0, (FACE_YAW[p.face] || 0) + yaw0, 0)),
       px: p.x, pz: p.y, ground: 0, idle: null, hue: -1, back: null,
       pal: null, palHue: -1, palIdle: null,
-      sitOff: p.state === 'type' ? o.sitFwd : 0,     // 0..o.sitFwd
+      sitOff: deskSeated(p) ? o.sitFwd : 0,          // 0..o.sitFwd
     };
   }
 
@@ -1079,6 +1146,7 @@ export function createCharacters(opts = {}) {
     });
     setClip(a, CLIP_FOR[p.state] || 'idle', 0);
     layerDesk(a, p.state === 'type', 0);
+    a.deskOn = p.state === 'type';
     mixer.update(0);              // otherwise frame 1 is the bind pose (a T-pose)
     group.add(root);
     a.lod = 'full'; a.gen = gen;
@@ -1257,7 +1325,9 @@ export function createCharacters(opts = {}) {
       const yaw = (moving && !teleport && d > 0.004
         ? Math.atan2(dx, dz) : FACE_YAW[p.face] || 0) + yaw0;
       turnTo(a.q, yaw, o.turnRate, dt, ff);
-      const seated = p.state === 'type';
+      /* Anyone at their own desk sits. Gating this on 'type' alone left thinking
+         and filing people standing over their chairs - 13 of 17 on a normal floor. */
+      const seated = deskSeated(p);
       const isIdle = clock - p.last > idleAfter;
       const back = backOf(p, focus, q, personText);
 
@@ -1286,10 +1356,15 @@ export function createCharacters(opts = {}) {
       }
 
       if (a.lod === 'full') {
-        const key = CLIP_FOR[p.state] || 'idle';
-        if (key !== a.baseKey) {
-          setClip(a, key, ff ? 0 : o.fade);
-          layerDesk(a, seated, ff ? 0 : o.fade);
+        const key = seated ? 'type' : (CLIP_FOR[p.state] || 'idle');
+        if (key !== a.baseKey) setClip(a, key, ff ? 0 : o.fade);
+        /* Gated on its own flag, not on the base clip changing: every seated state
+           shares the one seated clip, so `key` stops changing and a think -> type
+           switch used to leave the hands in the lap. */
+        const typing = p.state === 'type';
+        if (typing !== a.deskOn) {
+          layerDesk(a, typing, ff ? 0 : o.fade);
+          a.deskOn = typing;
         }
         if (a.base) {
           a.base.setEffectiveTimeScale(

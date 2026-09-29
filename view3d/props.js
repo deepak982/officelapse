@@ -127,6 +127,8 @@ export function mergeParts(parts) {
 /* -------------------------------------------------------- shared clusters --- */
 /* A desk and its chair are the same in every room, so they are merged into the
    room shell rather than batched as props — see buildRoomShell. */
+const OVERHANG = .22;
+
 function deskParts(x, z, seat, big) {
   const w = big ? 1.9 : .96, d = .78;
   /* the monitor goes on the far side from the chair, or the occupant types into
@@ -134,11 +136,19 @@ function deskParts(x, z, seat, big) {
   const far = seat.z > z;
   const mz = far ? z + .10 : z + d - .22;
   const cx = x + w / 2;
+  /* The top overhangs the pedestal toward the chair, the way a real desk does. Seat and
+     desk own neighbouring tiles, so without it the near edge is half a tile from the
+     occupant and a seated arm cannot reach the keys without locking out straight. The
+     pedestal does not move, so this costs nothing in walking room. */
+  const zTop = far ? z + .06 : z + .06 - OVERHANG;
+  const kz = far ? z + d + OVERHANG - .24 : zTop + .02;
   return [
-    bx(MAT.plastic, COL.desk, x + .02, H.desk - .05, z + .06, w, .05, d),
+    bx(MAT.plastic, COL.desk, x + .02, H.desk - .05, zTop, w, .05, d + OVERHANG),
     bx(MAT.plastic, COL.deskEdge, x + .12, 0, z + .16, w - .24, H.desk - .05, d - .22),
     bx(MAT.metal, COL.metalDark, cx - .05, H.desk, mz + .04, .10, .16, .07),
     bx(MAT.screen, COL.screenOff, cx - .29, H.desk + .16, mz, .58, .36, .04),
+    // on the overhang, right in front of the chair, so the hands have something to hit
+    bx(MAT.plastic, COL.metalDark, cx - .23, H.desk, kz, .46, .02, .16),
   ];
 }
 
